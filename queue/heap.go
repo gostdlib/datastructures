@@ -103,7 +103,11 @@ func (p *priorityHeap[T]) Hydrate(ctx context.Context, b Backup[T]) error {
 }
 
 // Push implements Backing.Push().
-func (p *priorityHeap[T]) Push(ctx context.Context, vs []T) error {
+func (p *priorityHeap[T]) Push(ctx context.Context, vs []T, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	if err := validateKind(true, vs); err != nil {
 		return err
 	}
@@ -118,6 +122,10 @@ func (p *priorityHeap[T]) Push(ctx context.Context, vs []T) error {
 			return ErrBatchTooLarge
 		}
 		if p.maxSize == 0 || p.h.Len()+len(vs) <= p.maxSize {
+			if err := runSideEffect(opts.sideEffect); err != nil {
+				p.lk.unlock()
+				return err
+			}
 			if p.backup != nil {
 				if err := p.backup.Push(ctx, vs); err != nil {
 					p.lk.unlock()
@@ -142,7 +150,11 @@ func (p *priorityHeap[T]) Push(ctx context.Context, vs []T) error {
 }
 
 // Pop implements Backing.Pop().
-func (p *priorityHeap[T]) Pop(ctx context.Context, n int) ([]T, error) {
+func (p *priorityHeap[T]) Pop(ctx context.Context, n int, options ...OpOption) ([]T, error) {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return nil, err
+	}
 	for {
 		p.lk.lock()
 		if p.closed {
@@ -153,6 +165,12 @@ func (p *priorityHeap[T]) Pop(ctx context.Context, n int) ([]T, error) {
 			k := n
 			if k > p.h.Len() {
 				k = p.h.Len()
+			}
+			// The side effect runs before anything is removed, so a failure aborts
+			// with nothing removed.
+			if err := runSideEffect(opts.sideEffect); err != nil {
+				p.lk.unlock()
+				return nil, err
 			}
 			popped := make([]seqItem[T], 0, k)
 			out := make([]T, 0, k)
@@ -186,21 +204,29 @@ func (p *priorityHeap[T]) Pop(ctx context.Context, n int) ([]T, error) {
 }
 
 // Peek implements Backing.Peek().
-func (p *priorityHeap[T]) Peek(ctx context.Context) (T, bool, error) {
+func (p *priorityHeap[T]) Peek(ctx context.Context, options ...OpOption) (T, bool, error) {
 	var zero T
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return zero, false, err
+	}
 	p.lk.rlock()
 	defer p.lk.runlock()
 	if p.closed {
 		return zero, false, ErrClosed
 	}
 	if p.h.Len() == 0 {
-		return zero, false, nil
+		return zero, false, runSideEffect(opts.sideEffect)
 	}
-	return p.h.items[0].item, true, nil
+	return p.h.items[0].item, true, runSideEffect(opts.sideEffect)
 }
 
 // Exists implements Backing.Exists().
-func (p *priorityHeap[T]) Exists(ctx context.Context, v T) (bool, error) {
+func (p *priorityHeap[T]) Exists(ctx context.Context, v T, options ...OpOption) (bool, error) {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return false, err
+	}
 	p.lk.rlock()
 	defer p.lk.runlock()
 	if p.closed {
@@ -208,14 +234,18 @@ func (p *priorityHeap[T]) Exists(ctx context.Context, v T) (bool, error) {
 	}
 	for _, it := range p.h.items {
 		if it.item.Equal(v) {
-			return true, nil
+			return true, runSideEffect(opts.sideEffect)
 		}
 	}
-	return false, nil
+	return false, runSideEffect(opts.sideEffect)
 }
 
 // Del implements Backing.Del().
-func (p *priorityHeap[T]) Del(ctx context.Context, v []T) error {
+func (p *priorityHeap[T]) Del(ctx context.Context, v []T, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	p.lk.lock()
 	defer p.lk.unlock()
 	if p.closed {
@@ -231,7 +261,12 @@ func (p *priorityHeap[T]) Del(ctx context.Context, v []T) error {
 		kept = append(kept, it)
 	}
 	if len(removed) == 0 {
-		return nil
+		return runSideEffect(opts.sideEffect)
+	}
+	// The side effect and backup mirror both run before the deletion is applied, so a
+	// failure of either aborts with nothing removed.
+	if err := runSideEffect(opts.sideEffect); err != nil {
+		return err
 	}
 	if p.backup != nil {
 		if err := p.backup.Del(ctx, removed); err != nil {
@@ -248,7 +283,11 @@ func (p *priorityHeap[T]) Del(ctx context.Context, v []T) error {
 }
 
 // NotEmpty implements Backing.NotEmpty().
-func (p *priorityHeap[T]) NotEmpty(ctx context.Context) error {
+func (p *priorityHeap[T]) NotEmpty(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	for {
 		p.lk.rlock()
 		if p.closed {
@@ -256,8 +295,9 @@ func (p *priorityHeap[T]) NotEmpty(ctx context.Context) error {
 			return ErrClosed
 		}
 		if p.h.Len() > 0 {
+			err := runSideEffect(opts.sideEffect)
 			p.lk.runlock()
-			return nil
+			return err
 		}
 		if err := p.notEmpty.Wait(ctx, p.lk.runlock); err != nil {
 			return p.closedOrCause(ctx)
@@ -266,7 +306,11 @@ func (p *priorityHeap[T]) NotEmpty(ctx context.Context) error {
 }
 
 // NotFull implements Backing.NotFull().
-func (p *priorityHeap[T]) NotFull(ctx context.Context) error {
+func (p *priorityHeap[T]) NotFull(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	for {
 		p.lk.rlock()
 		if p.closed {
@@ -274,8 +318,9 @@ func (p *priorityHeap[T]) NotFull(ctx context.Context) error {
 			return ErrClosed
 		}
 		if p.maxSize == 0 || p.h.Len() < p.maxSize {
+			err := runSideEffect(opts.sideEffect)
 			p.lk.runlock()
-			return nil
+			return err
 		}
 		if err := p.notFull.Wait(ctx, p.lk.runlock); err != nil {
 			return p.closedOrCause(ctx)
@@ -305,13 +350,23 @@ func (p *priorityHeap[T]) closedOrCause(ctx context.Context) error {
 }
 
 // Close implements Backing.Close().
-func (p *priorityHeap[T]) Close(ctx context.Context) error {
+func (p *priorityHeap[T]) Close(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	p.lk.lock()
 	if p.closed {
+		err := runSideEffect(opts.sideEffect)
 		p.lk.unlock()
-		return nil
+		return err
 	}
-	var err error
+	// The side effect runs before the close takes effect; a failure aborts the close and
+	// the backing stays open.
+	if err := runSideEffect(opts.sideEffect); err != nil {
+		p.lk.unlock()
+		return err
+	}
 	if p.backup != nil {
 		err = p.backup.Close(ctx)
 	}
@@ -323,14 +378,23 @@ func (p *priorityHeap[T]) Close(ctx context.Context) error {
 }
 
 // Clear implements Backing.Clear().
-func (p *priorityHeap[T]) Clear(ctx context.Context) error {
+func (p *priorityHeap[T]) Clear(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	p.lk.lock()
 	defer p.lk.unlock()
 	if p.closed {
 		return ErrClosed
 	}
 	if p.h.Len() == 0 {
-		return nil
+		return runSideEffect(opts.sideEffect)
+	}
+	// The side effect and backup clear both run before the items are dropped, so a
+	// failure of either aborts with nothing removed.
+	if err := runSideEffect(opts.sideEffect); err != nil {
+		return err
 	}
 	if p.backup != nil {
 		if err := p.backup.Clear(ctx); err != nil {

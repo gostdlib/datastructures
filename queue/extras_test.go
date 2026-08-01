@@ -359,8 +359,8 @@ func TestWithBTreeWidth(t *testing.T) {
 	}
 }
 
-// TestWithSideEffect verifies WithSideEffect runs after a successful op and that its error
-// is surfaced without rolling back the op (the item is still pushed/popped).
+// TestWithSideEffect verifies WithSideEffect runs under the lock as part of a successful op
+// and that a side-effect failure rolls the op back (nothing pushed/popped/closed).
 func TestWithSideEffect(t *testing.T) {
 	ctx := t.Context()
 	bk, err := NewFIFO[Number[int]]()
@@ -386,23 +386,40 @@ func TestWithSideEffect(t *testing.T) {
 	switch {
 	case !errors.Is(err, sentinel):
 		t.Errorf("TestWithSideEffect: Push got err == %v, want %v", err, sentinel)
-	case !ok:
-		t.Errorf("TestWithSideEffect: Push got ok == false, want true (item still pushed despite side-effect error)")
+	case ok:
+		t.Errorf("TestWithSideEffect: Push got ok == true, want false (push rolled back on side-effect error)")
 	}
-	if q.Len() != 2 {
-		t.Errorf("TestWithSideEffect: Len got %d, want 2 (both items pushed)", q.Len())
+	if q.Len() != 1 {
+		t.Errorf("TestWithSideEffect: Len got %d, want 1 (failed push rolled back)", q.Len())
 	}
 
-	// Pop side effect runs and its error is surfaced; the item is still popped.
+	// A failing Pop side effect rolls the pop back: no items removed.
 	items, err := q.Pop(ctx, 1, WithSideEffect(func() error { return sentinel }))
 	switch {
 	case !errors.Is(err, sentinel):
 		t.Errorf("TestWithSideEffect: Pop got err == %v, want %v", err, sentinel)
-	case len(items) != 1 || items[0].V != 1:
-		t.Errorf("TestWithSideEffect: Pop got items == %v, want [1] (item still popped)", items)
+	case items != nil:
+		t.Errorf("TestWithSideEffect: Pop got items == %v, want nil (pop rolled back)", items)
 	}
 	if q.Len() != 1 {
-		t.Errorf("TestWithSideEffect: Len after Pop got %d, want 1", q.Len())
+		t.Errorf("TestWithSideEffect: Len after failed Pop got %d, want 1 (pop rolled back)", q.Len())
+	}
+
+	// A successful Pop side effect runs and the item is popped.
+	items, err = q.Pop(ctx, 1, WithSideEffect(func() error { return nil }))
+	switch {
+	case err != nil:
+		t.Errorf("TestWithSideEffect: Pop got err == %v, want err == nil", err)
+	case len(items) != 1 || items[0].V != 1:
+		t.Errorf("TestWithSideEffect: Pop got items == %v, want [1]", items)
+	}
+
+	// A failing Close side effect aborts the close: the queue stays usable.
+	if err := q.Close(ctx, WithSideEffect(func() error { return sentinel })); !errors.Is(err, sentinel) {
+		t.Errorf("TestWithSideEffect: Close got err == %v, want %v", err, sentinel)
+	}
+	if ok, err := q.Push(ctx, []Number[int]{fifoItem(3)}); err != nil || !ok {
+		t.Errorf("TestWithSideEffect: Push after aborted Close got (ok=%v err=%v), want (true,nil) (close rolled back)", ok, err)
 	}
 	if err := q.Close(ctx); err != nil {
 		t.Errorf("TestWithSideEffect: Close got err == %s, want err == nil", err)

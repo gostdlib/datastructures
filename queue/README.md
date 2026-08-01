@@ -235,10 +235,12 @@ an already-populated store, items are recovered from the database (not the backu
 
 ## Side effects on an operation
 
-`WithSideEffect` runs after the operation succeeds, as part of the same call; if it
-returns an error, the operation returns that error. It takes no arguments (suited to
-cross-cutting bookkeeping like metrics). To key external state by the popped values, use
-the slice `Pop` returns.
+`WithSideEffect` runs while the queue's lock is held, as part of the same call, so no
+other queue operation can interleave between the operation and its side effect; if it
+returns an error, the operation is rolled back (nothing mutated) and that error is
+returned. It must not call methods on the same queue (that self-deadlocks). It takes no
+arguments (suited to cross-cutting bookkeeping like metrics). To key external state by
+the popped values, use the slice `Pop` returns.
 
 ```go
 stats := map[string]int{}

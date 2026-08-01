@@ -304,44 +304,68 @@ func New[T Item[T]](ctx context.Context, name string, b Backing[T], maxSize int,
 	return q, nil
 }
 
+// opOptions hold per-operation options.
 type opOptions struct {
+	// sideEffect runs while the queue's lock is held, once the operation is otherwise
+	// guaranteed to succeed; a non-nil return rolls the operation back. nil (the
+	// default) means no side effect. See WithSideEffect.
 	sideEffect func() error
 }
 
-// OpOption is an optional arugment for queue operations.
-type OpOption func(opts opOptions) opOptions
+// OpOption is an optional argument for queue operations. Options are applied in order, so
+// later options override earlier ones. All options are optional; zero values ask for defaults.
+type OpOption func(opts opOptions) (opOptions, error)
 
-// WithSideEffect adds a side effect to be called after the main operation is successful. If this fails,
-// the main operation will not be rolled back, but the error will be returned to the caller.
-func WithSideEffect(f func() error) OpOption {
-	return func(opts opOptions) opOptions {
-		opts.sideEffect = f
-		return opts
+// resolveOpOptions applies each option in order, propagating any error.
+func resolveOpOptions(opts []OpOption) (opOptions, error) {
+	o := opOptions{}
+	for _, opt := range opts {
+		var err error
+		o, err = opt(o)
+		if err != nil {
+			return o, err
+		}
 	}
+	return o, nil
+}
+
+// WithSideEffect adds a side effect that runs while the queue's lock is still held, so no other queue
+// operation can interleave between the operation and its side effect. Mutating operations
+// (Push/Pop/Del/Clear/Close) run it under the write lock once the operation is otherwise guaranteed to
+// succeed; if the side effect returns an error the operation is rolled back (nothing is mutated) and the
+// error is returned to the caller. Read operations (Peek/Exists/NotEmpty/NotFull) run it under the read
+// lock, so side effects of concurrent readers may run concurrently with each other. If the side effect
+// succeeds but the operation subsequently fails (a backup mirror or on-disk commit failure), the
+// operation is rolled back but the side effect cannot be un-run; for the on-disk backing a Push side
+// effect runs at buffer-admission time, so a later commit failure is reported by Push with the side
+// effect already run. The side effect must not call methods on the same queue — that self-deadlocks.
+func WithSideEffect(f func() error) OpOption {
+	return func(opts opOptions) (opOptions, error) {
+		opts.sideEffect = f
+		return opts, nil
+	}
+}
+
+// runSideEffect invokes se if non-nil. Backings call this inside their critical sections, once the
+// operation is otherwise guaranteed to succeed; a non-nil return aborts (rolls back) the operation.
+func runSideEffect(se func() error) error {
+	if se == nil {
+		return nil
+	}
+	return se()
 }
 
 // Close closes the queue and releases any resources associated with it. After calling Close,
 // the queue should not be used. Any Push/Pop/NotEmpty/NotFull blocked on a full/empty queue
 // unblocks and returns ErrClosed, which takes precedence over a simultaneous context
-// cancellation.
+// cancellation. If a side effect is configured it runs under the lock before the close takes
+// effect; if it fails the close is rolled back (the queue stays open) and the error returned.
 func (q *Queue[T]) Close(ctx context.Context, options ...OpOption) (err error) {
 	ctx, done := q.instrument(ctx, "Close")
 	defer func() { done(&err) }()
 
-	opts := opOptions{}
-	for _, option := range options {
-		opts = option(opts)
-	}
-
-	if err = q.backing.Close(ctx); err != nil {
-		return err
-	}
-
-	if opts.sideEffect != nil {
-		err = opts.sideEffect()
-		return err
-	}
-	return nil
+	err = q.backing.Close(ctx, options...)
+	return err
 }
 
 // NotEmpty waits until the queue is not empty or the context is cancelled. If the queue
@@ -351,20 +375,8 @@ func (q *Queue[T]) NotEmpty(ctx context.Context, options ...OpOption) (err error
 	ctx, done := q.instrument(ctx, "NotEmpty")
 	defer func() { done(&err) }()
 
-	opts := opOptions{}
-	for _, option := range options {
-		opts = option(opts)
-	}
-
-	if err = q.backing.NotEmpty(ctx); err != nil {
-		return err
-	}
-
-	if opts.sideEffect != nil {
-		err = opts.sideEffect()
-		return err
-	}
-	return nil
+	err = q.backing.NotEmpty(ctx, options...)
+	return err
 }
 
 // NotFull waits until the queue is not full or the context is cancelled. If the queue is
@@ -374,20 +386,8 @@ func (q *Queue[T]) NotFull(ctx context.Context, options ...OpOption) (err error)
 	ctx, done := q.instrument(ctx, "NotFull")
 	defer func() { done(&err) }()
 
-	opts := opOptions{}
-	for _, option := range options {
-		opts = option(opts)
-	}
-
-	if err = q.backing.NotFull(ctx); err != nil {
-		return err
-	}
-
-	if opts.sideEffect != nil {
-		err = opts.sideEffect()
-		return err
-	}
-	return nil
+	err = q.backing.NotFull(ctx, options...)
+	return err
 }
 
 // Push pushes a batch of items onto the queue as a unit: either all items are pushed or
@@ -397,23 +397,27 @@ func (q *Queue[T]) NotFull(ctx context.Context, options ...OpOption) (err error)
 // as does a batch larger than a bounded queue's maximum size. Otherwise Push blocks until
 // the whole batch fits or the context is canceled, in which case context.Cause(ctx) is
 // returned. If the queue is closed while a Push is blocked it returns (false, ErrClosed);
-// ErrClosed takes precedence over a simultaneous context cancellation. Because the items
-// can be pushed but the side effect can fail, the second return value indicates whether
-// the batch was pushed: if false the error indicates why; if true the error reports the
-// side effect's result.
+// ErrClosed takes precedence over a simultaneous context cancellation. If a side effect is
+// configured it runs under the lock; if it fails the push is rolled back (nothing is
+// pushed) and (false, err) is returned. The second return value reports whether the batch
+// is in the queue: it is true exactly when err == nil.
 func (q *Queue[T]) Push(ctx context.Context, vs []T, options ...OpOption) (ok bool, err error) {
 	ctx, done := q.instrument(ctx, "Push")
 	defer func() { done(&err) }()
 
-	opts := opOptions{}
-	for _, option := range options {
-		opts = option(opts)
-	}
-
 	if len(vs) == 0 {
+		var opts opOptions
+		opts, err = resolveOpOptions(options)
+		if err != nil {
+			return false, err
+		}
 		if opts.sideEffect != nil {
+			q.lk.lock()
 			err = opts.sideEffect()
-			return true, err
+			q.lk.unlock()
+			if err != nil {
+				return false, err
+			}
 		}
 		return true, nil
 	}
@@ -423,15 +427,10 @@ func (q *Queue[T]) Push(ctx context.Context, vs []T, options ...OpOption) (ok bo
 		return false, err
 	}
 
-	if err = q.backing.Push(ctx, vs); err != nil {
+	if err = q.backing.Push(ctx, vs, options...); err != nil {
 		return false, err
 	}
 	q.recordDepth(ctx)
-
-	if opts.sideEffect != nil {
-		err = opts.sideEffect()
-		return true, err
-	}
 	return true, nil
 }
 
@@ -441,8 +440,8 @@ func (q *Queue[T]) Push(ctx context.Context, vs []T, options ...OpOption) (ok bo
 // whatever is available without further blocking. If the queue is closed while a Pop is
 // blocked it returns ErrClosed; ErrClosed takes precedence over a simultaneous context
 // cancellation. The returned slice is non-empty on a nil error. If a side effect is
-// configured it runs after the items are removed; its error is returned alongside the
-// items (the items are still removed).
+// configured it runs under the lock; if it fails the pop is rolled back (no items are
+// removed) and (nil, err) is returned.
 func (q *Queue[T]) Pop(ctx context.Context, n int, options ...OpOption) (items []T, err error) {
 	if n < 1 {
 		panic("invalid argument: n must be >= 1")
@@ -450,20 +449,11 @@ func (q *Queue[T]) Pop(ctx context.Context, n int, options ...OpOption) (items [
 	ctx, done := q.instrument(ctx, "Pop")
 	defer func() { done(&err) }()
 
-	opts := opOptions{}
-	for _, option := range options {
-		opts = option(opts)
-	}
-
-	items, err = q.backing.Pop(ctx, n)
+	items, err = q.backing.Pop(ctx, n, options...)
 	if err != nil {
 		return nil, err
 	}
 	q.recordDepth(ctx)
-	if opts.sideEffect != nil {
-		err = opts.sideEffect()
-		return items, err
-	}
 	return items, nil
 }
 
@@ -474,20 +464,8 @@ func (q *Queue[T]) Peek(ctx context.Context, options ...OpOption) (v T, ok bool,
 	ctx, done := q.instrument(ctx, "Peek")
 	defer func() { done(&err) }()
 
-	opts := opOptions{}
-	for _, option := range options {
-		opts = option(opts)
-	}
-
-	v, ok, err = q.backing.Peek(ctx)
-	if err != nil {
-		return v, false, err
-	}
-	if opts.sideEffect != nil {
-		err = opts.sideEffect()
-		return v, ok, err
-	}
-	return v, ok, nil
+	v, ok, err = q.backing.Peek(ctx, options...)
+	return v, ok, err
 }
 
 // Exists returns true if the item exists in the queue. This is useful for checking if an item is in the queue before
@@ -497,42 +475,22 @@ func (q *Queue[T]) Exists(ctx context.Context, v T, options ...OpOption) (exists
 	ctx, done := q.instrument(ctx, "Exists")
 	defer func() { done(&err) }()
 
-	opts := opOptions{}
-	for _, option := range options {
-		opts = option(opts)
-	}
-
-	exists, err = q.backing.Exists(ctx, v)
-	if err != nil {
-		return false, err
-	}
-	if opts.sideEffect != nil {
-		err = opts.sideEffect()
-		return exists, err
-	}
-	return exists, nil
+	exists, err = q.backing.Exists(ctx, v, options...)
+	return exists, err
 }
 
 // Del removes every item from the queue that returns Item.Equal(e) == true for any element e of v
 // (all matches, not just one). Duplicate elements in v are idempotent and an empty v is a no-op.
-// If no items match, this returns a nil error.
+// If no items match, this returns a nil error. If a side effect is configured it runs under the
+// lock; if it fails the deletion is rolled back (nothing is removed) and the error returned.
 func (q *Queue[T]) Del(ctx context.Context, v []T, options ...OpOption) (err error) {
 	ctx, done := q.instrument(ctx, "Del")
 	defer func() { done(&err) }()
 
-	opts := opOptions{}
-	for _, option := range options {
-		opts = option(opts)
-	}
-
-	if err = q.backing.Del(ctx, v); err != nil {
+	if err = q.backing.Del(ctx, v, options...); err != nil {
 		return err
 	}
 	q.recordDepth(ctx)
-	if opts.sideEffect != nil {
-		err = opts.sideEffect()
-		return err
-	}
 	return nil
 }
 
@@ -551,23 +509,16 @@ func (q *Queue[T]) Len() int64 {
 	return q.backing.Len()
 }
 
-// Clear removes all items from the queue.
+// Clear removes all items from the queue. If a side effect is configured it runs under the
+// lock; if it fails the clear is rolled back (nothing is removed) and the error returned.
 func (q *Queue[T]) Clear(ctx context.Context, options ...OpOption) (err error) {
 	ctx, done := q.instrument(ctx, "Clear")
 	defer func() { done(&err) }()
 
-	opts := opOptions{}
-	for _, option := range options {
-		opts = option(opts)
-	}
-	if err = q.backing.Clear(ctx); err != nil {
+	if err = q.backing.Clear(ctx, options...); err != nil {
 		return err
 	}
 	q.recordDepth(ctx)
-	if opts.sideEffect != nil {
-		err = opts.sideEffect()
-		return err
-	}
 	return nil
 }
 
@@ -635,43 +586,57 @@ type Backing[T Item[T]] interface {
 	// or the context is canceled (context.Cause(ctx)). The caller guarantees len(vs) > 0.
 	// If Close is called while Push is blocked, the call unblocks and returns ErrClosed;
 	// ErrClosed takes precedence over context cancellation (a closed backing returns
-	// ErrClosed even if ctx is also canceled).
-	Push(ctx context.Context, vs []T) error
+	// ErrClosed even if ctx is also canceled). A WithSideEffect option runs under the
+	// write lock once the push is otherwise guaranteed to succeed; a non-nil return rolls
+	// the push back and is returned.
+	Push(ctx context.Context, vs []T, options ...OpOption) error
 	// Pop removes and returns up to n items from the front of the queue. It blocks until
 	// at least one item is available or the context is canceled (context.Cause(ctx)),
 	// then returns 1..n items. The caller guarantees n >= 1. If Close is called while Pop
 	// is blocked, the call unblocks and returns ErrClosed; ErrClosed takes precedence over
-	// context cancellation.
-	Pop(ctx context.Context, n int) ([]T, error)
+	// context cancellation. A WithSideEffect option runs under the write lock once
+	// the pop is otherwise guaranteed to succeed; a non-nil return rolls the pop back
+	// (no items removed) and is returned.
+	Pop(ctx context.Context, n int, options ...OpOption) ([]T, error)
 	// Peek returns the item at the front of the queue without removing it. If the queue is empty the
 	// second return value will be false. If the queue is not empty, the second return value will be true
-	// and the first return value will be the item at the front of the queue.
-	Peek(ctx context.Context) (T, bool, error)
+	// and the first return value will be the item at the front of the queue. A WithSideEffect option
+	// runs under the read lock before it is released; its error is returned.
+	Peek(ctx context.Context, options ...OpOption) (T, bool, error)
 	// Exists returns true if the item exists in the queue. This is useful for checking if an item is in the queue before
 	// pushing it onto the queue. We use bloom filters if available and priority also helps. If neither, we have to
 	// do a linear scan of the queue, which is O(n) and not ideal. Errors are only for disk issues.
-	Exists(ctx context.Context, v T) (bool, error)
+	// A WithSideEffect option runs under the read lock before it is released; its error is returned.
+	Exists(ctx context.Context, v T, options ...OpOption) (bool, error)
 	// Del removes every item from the queue that returns Item.Equal(e) == true for any element e of v
 	// (all matches, not just one). Duplicate elements in v are idempotent and an empty v is a no-op.
-	// If no items match, this returns a nil error. Errors are only for disk issues.
-	Del(ctx context.Context, v []T) error
+	// If no items match, this returns a nil error. Errors are only for disk issues. A WithSideEffect
+	// option runs under the write lock once the deletion is otherwise guaranteed to succeed; a
+	// non-nil return rolls the deletion back and is returned.
+	Del(ctx context.Context, v []T, options ...OpOption) error
 	// NotEmpty waits until the queue is not empty or the context is cancelled. If Close
 	// is called while blocked it returns ErrClosed; ErrClosed takes precedence over
-	// context cancellation.
-	NotEmpty(ctx context.Context) error
+	// context cancellation. A WithSideEffect option runs under the read lock before
+	// it is released; its error is returned.
+	NotEmpty(ctx context.Context, options ...OpOption) error
 	// NotFull waits until the queue is not full or the context is cancelled. If Close is
 	// called while blocked it returns ErrClosed; ErrClosed takes precedence over context
-	// cancellation.
-	NotFull(ctx context.Context) error
+	// cancellation. A WithSideEffect option runs under the read lock before it is
+	// released; its error is returned.
+	NotFull(ctx context.Context, options ...OpOption) error
 	// Len returns the number of items in the queue.
 	Len() int64
 	// Close closes the queue and releases any resources associated with it. After calling
 	// Close, the queue should not be used. Close unblocks any in-flight Push/Pop/NotEmpty/
 	// NotFull blocked on a full/empty queue; those calls return ErrClosed (which takes
-	// precedence over a simultaneous context cancellation).
-	Close(ctx context.Context) error
-	// Clear removes all items from the queue. Errors are only for disk issues.
-	Clear(ctx context.Context) error
+	// precedence over a simultaneous context cancellation). A WithSideEffect option
+	// runs under the write lock before the close takes effect; a non-nil return aborts the
+	// close (the backing stays open) and is returned.
+	Close(ctx context.Context, options ...OpOption) error
+	// Clear removes all items from the queue. Errors are only for disk issues. A WithSideEffect
+	// option runs under the write lock once the clear is otherwise guaranteed to succeed; a
+	// non-nil return rolls the clear back and is returned.
+	Clear(ctx context.Context, options ...OpOption) error
 	// All ranges over the items holding the read lock for the whole iteration.
 	// Errors are only for disk issues or if the context is canceled.
 	All(ctx context.Context) iter.Seq2[T, error]
