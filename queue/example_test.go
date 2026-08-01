@@ -398,10 +398,11 @@ func Example_backup() {
 	// backup len after drain: 0
 }
 
-// Example_sideEffect runs a WithSideEffect on Pop: it executes after the pop succeeds,
-// as part of the same call (if it returns an error, Pop returns that error). It takes
-// no arguments, so it suits cross-cutting bookkeeping like metrics; to key external
-// state by the popped values, use the slice Pop returns.
+// Example_sideEffect runs a WithSideEffect on Pop: it executes while the queue's lock is
+// held, as part of the same call, so no other queue operation can interleave with it (if
+// it returns an error, the pop is rolled back and Pop returns that error). It takes no
+// arguments, so it suits cross-cutting bookkeeping like metrics; to key external state by
+// the popped values, use the slice Pop returns.
 func Example_sideEffect() {
 	ctx := context.Background()
 

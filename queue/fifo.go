@@ -71,7 +71,11 @@ func (f *fifo[T]) Hydrate(ctx context.Context, b Backup[T]) error {
 }
 
 // Push implements Backing.Push().
-func (f *fifo[T]) Push(ctx context.Context, vs []T) error {
+func (f *fifo[T]) Push(ctx context.Context, vs []T, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	if err := validateKind(false, vs); err != nil {
 		return err
 	}
@@ -86,6 +90,10 @@ func (f *fifo[T]) Push(ctx context.Context, vs []T) error {
 			return ErrBatchTooLarge
 		}
 		if f.maxSize == 0 || len(f.items)+len(vs) <= f.maxSize {
+			if err := runSideEffect(opts.sideEffect); err != nil {
+				f.lk.unlock()
+				return err
+			}
 			if f.backup != nil {
 				if err := f.backup.Push(ctx, vs); err != nil {
 					f.lk.unlock()
@@ -109,7 +117,11 @@ func (f *fifo[T]) Push(ctx context.Context, vs []T) error {
 }
 
 // Pop implements Backing.Pop().
-func (f *fifo[T]) Pop(ctx context.Context, n int) ([]T, error) {
+func (f *fifo[T]) Pop(ctx context.Context, n int, options ...OpOption) ([]T, error) {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return nil, err
+	}
 	var zero T
 	for {
 		f.lk.lock()
@@ -124,8 +136,12 @@ func (f *fifo[T]) Pop(ctx context.Context, n int) ([]T, error) {
 			}
 			out := make([]T, k)
 			copy(out, f.items[:k])
-			// Mirror the exact popped items to the backup before removing them from
-			// the queue, so a backup failure aborts with nothing removed.
+			// The side effect and backup mirror both run before anything is removed
+			// from the queue, so a failure of either aborts with nothing removed.
+			if err := runSideEffect(opts.sideEffect); err != nil {
+				f.lk.unlock()
+				return nil, err
+			}
 			if f.backup != nil {
 				if err := f.backup.Del(ctx, out); err != nil {
 					f.lk.unlock()
@@ -151,21 +167,29 @@ func (f *fifo[T]) Pop(ctx context.Context, n int) ([]T, error) {
 }
 
 // Peek implements Backing.Peek().
-func (f *fifo[T]) Peek(ctx context.Context) (T, bool, error) {
+func (f *fifo[T]) Peek(ctx context.Context, options ...OpOption) (T, bool, error) {
 	var zero T
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return zero, false, err
+	}
 	f.lk.rlock()
 	defer f.lk.runlock()
 	if f.closed {
 		return zero, false, ErrClosed
 	}
 	if len(f.items) == 0 {
-		return zero, false, nil
+		return zero, false, runSideEffect(opts.sideEffect)
 	}
-	return f.items[0], true, nil
+	return f.items[0], true, runSideEffect(opts.sideEffect)
 }
 
 // Exists implements Backing.Exists().
-func (f *fifo[T]) Exists(ctx context.Context, v T) (bool, error) {
+func (f *fifo[T]) Exists(ctx context.Context, v T, options ...OpOption) (bool, error) {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return false, err
+	}
 	f.lk.rlock()
 	defer f.lk.runlock()
 	if f.closed {
@@ -173,14 +197,18 @@ func (f *fifo[T]) Exists(ctx context.Context, v T) (bool, error) {
 	}
 	for i := range f.items {
 		if f.items[i].Equal(v) {
-			return true, nil
+			return true, runSideEffect(opts.sideEffect)
 		}
 	}
-	return false, nil
+	return false, runSideEffect(opts.sideEffect)
 }
 
 // Del implements Backing.Del().
-func (f *fifo[T]) Del(ctx context.Context, v []T) error {
+func (f *fifo[T]) Del(ctx context.Context, v []T, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	f.lk.lock()
 	defer f.lk.unlock()
 	if f.closed {
@@ -196,9 +224,13 @@ func (f *fifo[T]) Del(ctx context.Context, v []T) error {
 		kept = append(kept, item)
 	}
 	if len(removed) == 0 {
-		return nil
+		return runSideEffect(opts.sideEffect)
 	}
-	// Mirror the exact removed items to the backup before applying the deletion.
+	// The side effect and backup mirror both run before the deletion is applied, so a
+	// failure of either aborts with nothing removed.
+	if err := runSideEffect(opts.sideEffect); err != nil {
+		return err
+	}
 	if f.backup != nil {
 		if err := f.backup.Del(ctx, removed); err != nil {
 			return err
@@ -213,7 +245,11 @@ func (f *fifo[T]) Del(ctx context.Context, v []T) error {
 }
 
 // NotEmpty implements Backing.NotEmpty().
-func (f *fifo[T]) NotEmpty(ctx context.Context) error {
+func (f *fifo[T]) NotEmpty(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	for {
 		f.lk.rlock()
 		if f.closed {
@@ -221,8 +257,9 @@ func (f *fifo[T]) NotEmpty(ctx context.Context) error {
 			return ErrClosed
 		}
 		if len(f.items) > 0 {
+			err := runSideEffect(opts.sideEffect)
 			f.lk.runlock()
-			return nil
+			return err
 		}
 		if err := f.notEmpty.Wait(ctx, f.lk.runlock); err != nil {
 			return f.closedOrCause(ctx)
@@ -231,7 +268,11 @@ func (f *fifo[T]) NotEmpty(ctx context.Context) error {
 }
 
 // NotFull implements Backing.NotFull().
-func (f *fifo[T]) NotFull(ctx context.Context) error {
+func (f *fifo[T]) NotFull(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	for {
 		f.lk.rlock()
 		if f.closed {
@@ -239,8 +280,9 @@ func (f *fifo[T]) NotFull(ctx context.Context) error {
 			return ErrClosed
 		}
 		if f.maxSize == 0 || len(f.items) < f.maxSize {
+			err := runSideEffect(opts.sideEffect)
 			f.lk.runlock()
-			return nil
+			return err
 		}
 		if err := f.notFull.Wait(ctx, f.lk.runlock); err != nil {
 			return f.closedOrCause(ctx)
@@ -270,13 +312,23 @@ func (f *fifo[T]) closedOrCause(ctx context.Context) error {
 }
 
 // Close implements Backing.Close().
-func (f *fifo[T]) Close(ctx context.Context) error {
+func (f *fifo[T]) Close(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	f.lk.lock()
 	if f.closed {
+		err := runSideEffect(opts.sideEffect)
 		f.lk.unlock()
-		return nil
+		return err
 	}
-	var err error
+	// The side effect runs before the close takes effect; a failure aborts the close and
+	// the backing stays open.
+	if err := runSideEffect(opts.sideEffect); err != nil {
+		f.lk.unlock()
+		return err
+	}
 	if f.backup != nil {
 		err = f.backup.Close(ctx)
 	}
@@ -289,14 +341,23 @@ func (f *fifo[T]) Close(ctx context.Context) error {
 }
 
 // Clear implements Backing.Clear().
-func (f *fifo[T]) Clear(ctx context.Context) error {
+func (f *fifo[T]) Clear(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	f.lk.lock()
 	defer f.lk.unlock()
 	if f.closed {
 		return ErrClosed
 	}
 	if len(f.items) == 0 {
-		return nil
+		return runSideEffect(opts.sideEffect)
+	}
+	// The side effect and backup clear both run before the items are dropped, so a
+	// failure of either aborts with nothing removed.
+	if err := runSideEffect(opts.sideEffect); err != nil {
+		return err
 	}
 	if f.backup != nil {
 		if err := f.backup.Clear(ctx); err != nil {

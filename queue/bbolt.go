@@ -55,8 +55,11 @@ type flushResult struct {
 // is deleted. Without this routing a Clear concurrent with a mid-commit Push would
 // delete the bucket before the commit's db.Update landed, letting the item reappear.
 type clearCmd struct {
-	ctx  context.Context
-	done chan error
+	ctx context.Context
+	// sideEffect is the Clear caller's WithSideEffect func (nil when unset); doClear runs
+	// it under the lock before the clear is applied.
+	sideEffect func() error
+	done       chan error
 }
 
 func jsonDecode[T any](data []byte) (T, error) {
@@ -362,7 +365,7 @@ func (p *bboltBacking[T]) flushLoop(ctx context.Context) error {
 		case <-p.flushReq:
 			p.doFlush(ctx)
 		case cmd := <-p.clearReq:
-			cmd.done <- p.doClear(cmd.ctx)
+			cmd.done <- p.doClear(cmd.ctx, cmd.sideEffect)
 		case <-t.C:
 			p.doFlush(ctx)
 		}
@@ -571,7 +574,15 @@ func (p *bboltBacking[T]) Hydrate(ctx context.Context, b Backup[T]) error {
 // momentarily filled the shared maxBatch buffer this Push flushes and retries (it always
 // fits once drained); that pre-buffer wait is context-cancelable, but once the items are
 // buffered the wait for the flush to commit is not.
-func (p *bboltBacking[T]) Push(ctx context.Context, vs []T) error {
+//
+// The side effect runs under the lock at buffer-admission time, before the items are
+// staged: a side-effect failure aborts with nothing staged. A commit failure after
+// admission fails the Push, but the side effect has already run and cannot be un-run.
+func (p *bboltBacking[T]) Push(ctx context.Context, vs []T, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	if err := validateKind(p.priority, vs); err != nil {
 		return err
 	}
@@ -592,6 +603,10 @@ func (p *bboltBacking[T]) Push(ctx context.Context, vs []T) error {
 			continue
 		}
 		if len(p.buf)+len(vs) <= p.maxBatch {
+			if err := runSideEffect(opts.sideEffect); err != nil {
+				p.lk.unlock()
+				return err
+			}
 			p.buf = append(p.buf, vs...)
 			p.inflight += int64(len(vs))
 			r := p.cur
@@ -624,7 +639,11 @@ func (p *bboltBacking[T]) Push(ctx context.Context, vs []T) error {
 }
 
 // Pop implements Backing.Pop().
-func (p *bboltBacking[T]) Pop(ctx context.Context, n int) ([]T, error) {
+func (p *bboltBacking[T]) Pop(ctx context.Context, n int, options ...OpOption) ([]T, error) {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return nil, err
+	}
 	for {
 		p.lk.lock()
 		if p.closed {
@@ -662,6 +681,11 @@ func (p *bboltBacking[T]) Pop(ctx context.Context, n int) ([]T, error) {
 						sks = append(sks, append([]byte(nil), key...))
 					}
 					key, data = c.Next()
+				}
+				// The side effect runs before the backup mirror and the deletes: an
+				// error rolls back the txn with nothing deleted and the backup untouched.
+				if err := runSideEffect(opts.sideEffect); err != nil {
+					return err
 				}
 				// Mirror the exact popped items to the backup before removing them.
 				// An error here rolls back the txn so nothing is deleted.
@@ -724,18 +748,22 @@ func (p *bboltBacking[T]) Pop(ctx context.Context, n int) ([]T, error) {
 }
 
 // Peek implements Backing.Peek().
-func (p *bboltBacking[T]) Peek(ctx context.Context) (T, bool, error) {
+func (p *bboltBacking[T]) Peek(ctx context.Context, options ...OpOption) (T, bool, error) {
 	var zero T
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return zero, false, err
+	}
 	p.lk.rlock()
 	defer p.lk.runlock()
 	if p.closed {
 		return zero, false, ErrClosed
 	}
 	if p.count == 0 {
-		return zero, false, nil
+		return zero, false, runSideEffect(opts.sideEffect)
 	}
 	var v T
-	err := p.db.View(func(tx *bolt.Tx) error {
+	err = p.db.View(func(tx *bolt.Tx) error {
 		_, data := tx.Bucket(bboltItemsBucket).Cursor().First()
 		if data == nil {
 			return ErrEmpty
@@ -750,18 +778,22 @@ func (p *bboltBacking[T]) Peek(ctx context.Context) (T, bool, error) {
 	if err != nil {
 		return zero, false, err
 	}
-	return v, true, nil
+	return v, true, runSideEffect(opts.sideEffect)
 }
 
 // Exists implements Backing.Exists().
-func (p *bboltBacking[T]) Exists(ctx context.Context, v T) (bool, error) {
+func (p *bboltBacking[T]) Exists(ctx context.Context, v T, options ...OpOption) (bool, error) {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return false, err
+	}
 	p.lk.rlock()
 	defer p.lk.runlock()
 	if p.closed {
 		return false, ErrClosed
 	}
 	found := false
-	err := p.db.View(func(tx *bolt.Tx) error {
+	err = p.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bboltItemsBucket)
 		if p.idx != nil {
 			for _, sk := range p.idx.bucket(v.Hash()) {
@@ -795,18 +827,22 @@ func (p *bboltBacking[T]) Exists(ctx context.Context, v T) (bool, error) {
 	if err != nil && !errors.Is(err, errStopIter) {
 		return false, err
 	}
-	return found, nil
+	return found, runSideEffect(opts.sideEffect)
 }
 
 // Del implements Backing.Del().
-func (p *bboltBacking[T]) Del(ctx context.Context, v []T) error {
+func (p *bboltBacking[T]) Del(ctx context.Context, v []T, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	p.lk.lock()
 	defer p.lk.unlock()
 	if p.closed {
 		return ErrClosed
 	}
 	if p.count == 0 {
-		return nil
+		return runSideEffect(opts.sideEffect)
 	}
 	// Collect the keys and items matching v without deleting them. The lock is held
 	// for the whole Del, so the database cannot change before the delete below.
@@ -866,7 +902,12 @@ func (p *bboltBacking[T]) Del(ctx context.Context, v []T) error {
 		return err
 	}
 	if len(keys) == 0 {
-		return nil
+		return runSideEffect(opts.sideEffect)
+	}
+	// The side effect runs before the backup mirror and the deletes: a failure aborts
+	// with nothing removed and the backup untouched.
+	if err := runSideEffect(opts.sideEffect); err != nil {
+		return err
 	}
 	// Mirror the exact removed items to the backup before deleting them.
 	if p.backup != nil {
@@ -874,7 +915,7 @@ func (p *bboltBacking[T]) Del(ctx context.Context, v []T) error {
 			return err
 		}
 	}
-	err := p.db.Update(func(tx *bolt.Tx) error {
+	err = p.db.Update(func(tx *bolt.Tx) error {
 		if p.hooks.faultAfterBackup != nil {
 			if e := p.hooks.faultAfterBackup(); e != nil {
 				return e
@@ -915,7 +956,11 @@ func (p *bboltBacking[T]) Del(ctx context.Context, v []T) error {
 }
 
 // NotEmpty implements Backing.NotEmpty().
-func (p *bboltBacking[T]) NotEmpty(ctx context.Context) error {
+func (p *bboltBacking[T]) NotEmpty(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	for {
 		p.lk.rlock()
 		if p.closed {
@@ -923,8 +968,9 @@ func (p *bboltBacking[T]) NotEmpty(ctx context.Context) error {
 			return ErrClosed
 		}
 		if p.count > 0 {
+			err := runSideEffect(opts.sideEffect)
 			p.lk.runlock()
-			return nil
+			return err
 		}
 		if err := p.notEmpty.Wait(ctx, p.lk.runlock); err != nil {
 			return p.closedOrCause(ctx)
@@ -933,7 +979,11 @@ func (p *bboltBacking[T]) NotEmpty(ctx context.Context) error {
 }
 
 // NotFull implements Backing.NotFull().
-func (p *bboltBacking[T]) NotFull(ctx context.Context) error {
+func (p *bboltBacking[T]) NotFull(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	for {
 		p.lk.rlock()
 		if p.closed {
@@ -941,8 +991,9 @@ func (p *bboltBacking[T]) NotFull(ctx context.Context) error {
 			return ErrClosed
 		}
 		if p.maxSize == 0 || p.count < int64(p.maxSize) {
+			err := runSideEffect(opts.sideEffect)
 			p.lk.runlock()
-			return nil
+			return err
 		}
 		if err := p.notFull.Wait(ctx, p.lk.runlock); err != nil {
 			return p.closedOrCause(ctx)
@@ -972,11 +1023,22 @@ func (p *bboltBacking[T]) closedOrCause(ctx context.Context) error {
 }
 
 // Close implements Backing.Close().
-func (p *bboltBacking[T]) Close(ctx context.Context) error {
+func (p *bboltBacking[T]) Close(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	p.lk.lock()
 	if p.closed {
+		err := runSideEffect(opts.sideEffect)
 		p.lk.unlock()
-		return nil
+		return err
+	}
+	// The side effect runs before the close takes effect; a failure aborts the close and
+	// the backing stays open.
+	if err := runSideEffect(opts.sideEffect); err != nil {
+		p.lk.unlock()
+		return err
 	}
 	p.closed = true
 	p.lk.unlock()
@@ -1005,8 +1067,18 @@ func (p *bboltBacking[T]) Close(ctx context.Context) error {
 // mid-commit is drained first (its Push returns success and its items are briefly in
 // the queue) and only then is the bucket deleted. No in-flight commit can land items
 // after the delete.
-func (p *bboltBacking[T]) Clear(ctx context.Context) error {
-	cmd := &clearCmd{ctx: ctx, done: make(chan error, 1)}
+//
+// Context cancellation is honored only until the command is accepted: like a buffered
+// Push, once the flusher has the command Clear waits for its result, so the caller
+// never observes an error while the clear (and its side effect) happens after the
+// call. doClear itself aborts if the caller's ctx is already canceled when it starts,
+// before the side effect runs.
+func (p *bboltBacking[T]) Clear(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
+	cmd := &clearCmd{ctx: ctx, sideEffect: opts.sideEffect, done: make(chan error, 1)}
 	select {
 	case p.clearReq <- cmd:
 	case <-p.flushCtx.Done():
@@ -1018,10 +1090,14 @@ func (p *bboltBacking[T]) Clear(ctx context.Context) error {
 	case err := <-cmd.done:
 		return err
 	case <-p.flushCtx.Done():
-		// The flusher exited (Close) before processing cmd.
+		// The flusher exited (Close). It may have completed cmd concurrently; prefer
+		// its result over ErrClosed so a clear that actually happened is reported.
+		select {
+		case err := <-cmd.done:
+			return err
+		default:
+		}
 		return ErrClosed
-	case <-ctx.Done():
-		return context.Cause(ctx)
 	}
 }
 
@@ -1034,7 +1110,7 @@ func (p *bboltBacking[T]) Clear(ctx context.Context) error {
 // ctx: the items being committed belong to other callers' Pushes, and a Clear
 // caller's ctx cancellation must not fail them via backup.Push. The Clear-specific
 // operations below (backup.Clear) do use the caller's ctx — that one the caller owns.
-func (p *bboltBacking[T]) doClear(ctx context.Context) error {
+func (p *bboltBacking[T]) doClear(ctx context.Context, sideEffect func() error) error {
 	p.doFlush(p.flushCtx)
 
 	p.lk.lock()
@@ -1042,8 +1118,20 @@ func (p *bboltBacking[T]) doClear(ctx context.Context) error {
 	if p.closed {
 		return ErrClosed
 	}
+	// The caller is still waiting on cmd.done, but if its ctx was canceled while the
+	// command sat in the queue, abort before the side effect so nothing happens.
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	default:
+	}
 	if p.count == 0 {
-		return nil
+		return runSideEffect(sideEffect)
+	}
+	// The side effect runs before the backup clear and the bucket delete, so a failure
+	// aborts with nothing removed and the backup untouched.
+	if err := runSideEffect(sideEffect); err != nil {
+		return err
 	}
 	if p.backup != nil {
 		if err := p.backup.Clear(ctx); err != nil {

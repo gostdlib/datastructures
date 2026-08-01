@@ -67,7 +67,7 @@ func TestBboltDoClearDrainUsesFlusherCtx(t *testing.T) {
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
 
-	_ = p.doClear(cctx) // doClear's own backup.Clear/db.Update may run under cctx; not asserted here.
+	_ = p.doClear(cctx, nil) // doClear's own backup.Clear/db.Update may run under cctx; not asserted here.
 
 	<-bufCur.done
 	if bufCur.err != nil {
@@ -78,5 +78,58 @@ func TestBboltDoClearDrainUsesFlusherCtx(t *testing.T) {
 	}
 	if cerr := backup.pushCtxs[0].Err(); cerr != nil {
 		t.Errorf("TestBboltDoClearDrainUsesFlusherCtx: backup.Push was called with a canceled ctx (err=%v); the drain must use the flusher's ctx", cerr)
+	}
+}
+
+// TestBboltDoClearCanceledCtx is a regression test: a Clear caller whose ctx is canceled
+// while the command waits in the flusher queue must not have its side effect (or the
+// clear) run behind its back — doClear aborts with the cancellation cause before the
+// side effect.
+func TestBboltDoClearCanceledCtx(t *testing.T) {
+	ctx := t.Context()
+
+	tests := []struct {
+		name    string
+		cancel  bool
+		wantErr bool
+	}{
+		{name: "Success: live ctx runs the side effect", cancel: false, wantErr: false},
+		{name: "Error: canceled ctx aborts before the side effect", cancel: true, wantErr: true},
+	}
+
+	for _, test := range tests {
+		o, err := applyBackingOptions(callBboltFIFO, nil)
+		if err != nil {
+			t.Fatalf("TestBboltDoClearCanceledCtx(%s): applyBackingOptions got err == %s, want err == nil", test.name, err)
+		}
+		bk, err := newBboltBacking[Number[int]](ctx, diskRoot(t), o, bboltFIFOKey[Number[int]], false)
+		if err != nil {
+			t.Fatalf("TestBboltDoClearCanceledCtx(%s): newBboltBacking got err == %s, want err == nil", test.name, err)
+		}
+		p := bk.(*bboltBacking[Number[int]])
+		// setQueueLock is intentionally not called: the flusher stays offline so doClear
+		// is the only goroutine driving commit.
+		t.Cleanup(func() { _ = p.Close(ctx) })
+
+		cctx := ctx
+		if test.cancel {
+			var cancel context.CancelFunc
+			cctx, cancel = context.WithCancel(ctx)
+			cancel()
+		}
+
+		ran := false
+		err = p.doClear(cctx, func() error { ran = true; return nil })
+		switch {
+		case err == nil && test.wantErr:
+			t.Errorf("TestBboltDoClearCanceledCtx(%s): got err == nil, want err != nil", test.name)
+			continue
+		case err != nil && !test.wantErr:
+			t.Errorf("TestBboltDoClearCanceledCtx(%s): got err == %s, want err == nil", test.name, err)
+			continue
+		}
+		if ran == test.cancel {
+			t.Errorf("TestBboltDoClearCanceledCtx(%s): side effect ran == %v, want %v", test.name, ran, !test.cancel)
+		}
 	}
 }

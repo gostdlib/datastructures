@@ -184,7 +184,11 @@ func (b *btreeBacking[T]) Hydrate(ctx context.Context, bu Backup[T]) error {
 }
 
 // Push implements Backing.Push().
-func (b *btreeBacking[T]) Push(ctx context.Context, vs []T) error {
+func (b *btreeBacking[T]) Push(ctx context.Context, vs []T, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	if err := validateKind(b.priority, vs); err != nil {
 		return err
 	}
@@ -199,6 +203,10 @@ func (b *btreeBacking[T]) Push(ctx context.Context, vs []T) error {
 			return ErrBatchTooLarge
 		}
 		if b.maxSize == 0 || b.tree.Len()+len(vs) <= b.maxSize {
+			if err := runSideEffect(opts.sideEffect); err != nil {
+				b.lk.unlock()
+				return err
+			}
 			if b.backup != nil {
 				if err := b.backup.Push(ctx, vs); err != nil {
 					b.lk.unlock()
@@ -228,7 +236,11 @@ func (b *btreeBacking[T]) Push(ctx context.Context, vs []T) error {
 }
 
 // Pop implements Backing.Pop().
-func (b *btreeBacking[T]) Pop(ctx context.Context, n int) ([]T, error) {
+func (b *btreeBacking[T]) Pop(ctx context.Context, n int, options ...OpOption) ([]T, error) {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return nil, err
+	}
 	for {
 		b.lk.lock()
 		if b.closed {
@@ -239,6 +251,12 @@ func (b *btreeBacking[T]) Pop(ctx context.Context, n int) ([]T, error) {
 			k := n
 			if k > b.tree.Len() {
 				k = b.tree.Len()
+			}
+			// The side effect runs before anything is removed, so a failure aborts
+			// with nothing removed.
+			if err := runSideEffect(opts.sideEffect); err != nil {
+				b.lk.unlock()
+				return nil, err
 			}
 			out := make([]T, 0, k)
 			if b.backup != nil {
@@ -283,8 +301,12 @@ func (b *btreeBacking[T]) Pop(ctx context.Context, n int) ([]T, error) {
 }
 
 // Peek implements Backing.Peek().
-func (b *btreeBacking[T]) Peek(ctx context.Context) (T, bool, error) {
+func (b *btreeBacking[T]) Peek(ctx context.Context, options ...OpOption) (T, bool, error) {
 	var zero T
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return zero, false, err
+	}
 	b.lk.rlock()
 	defer b.lk.runlock()
 	if b.closed {
@@ -292,13 +314,17 @@ func (b *btreeBacking[T]) Peek(ctx context.Context) (T, bool, error) {
 	}
 	min, ok := b.tree.Min()
 	if !ok {
-		return zero, false, nil
+		return zero, false, runSideEffect(opts.sideEffect)
 	}
-	return min.item, true, nil
+	return min.item, true, runSideEffect(opts.sideEffect)
 }
 
 // Exists implements Backing.Exists().
-func (b *btreeBacking[T]) Exists(ctx context.Context, v T) (bool, error) {
+func (b *btreeBacking[T]) Exists(ctx context.Context, v T, options ...OpOption) (bool, error) {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return false, err
+	}
 	b.lk.rlock()
 	defer b.lk.runlock()
 	if b.closed {
@@ -307,10 +333,10 @@ func (b *btreeBacking[T]) Exists(ctx context.Context, v T) (bool, error) {
 	if b.idx != nil {
 		for _, si := range b.idx.bucket(v.Hash()) {
 			if si.item.Equal(v) {
-				return true, nil
+				return true, runSideEffect(opts.sideEffect)
 			}
 		}
-		return false, nil
+		return false, runSideEffect(opts.sideEffect)
 	}
 	found := false
 	b.tree.Scan(func(it seqItem[T]) bool {
@@ -320,11 +346,15 @@ func (b *btreeBacking[T]) Exists(ctx context.Context, v T) (bool, error) {
 		}
 		return true
 	})
-	return found, nil
+	return found, runSideEffect(opts.sideEffect)
 }
 
 // Del implements Backing.Del().
-func (b *btreeBacking[T]) Del(ctx context.Context, v []T) error {
+func (b *btreeBacking[T]) Del(ctx context.Context, v []T, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	b.lk.lock()
 	defer b.lk.unlock()
 	if b.closed {
@@ -361,7 +391,12 @@ func (b *btreeBacking[T]) Del(ctx context.Context, v []T) error {
 		})
 	}
 	if len(toDel) == 0 {
-		return nil
+		return runSideEffect(opts.sideEffect)
+	}
+	// The side effect and backup mirror both run before the deletion is applied, so a
+	// failure of either aborts with nothing removed.
+	if err := runSideEffect(opts.sideEffect); err != nil {
+		return err
 	}
 	if b.backup != nil {
 		removed := make([]T, 0, len(toDel))
@@ -386,7 +421,11 @@ func (b *btreeBacking[T]) Del(ctx context.Context, v []T) error {
 }
 
 // NotEmpty implements Backing.NotEmpty().
-func (b *btreeBacking[T]) NotEmpty(ctx context.Context) error {
+func (b *btreeBacking[T]) NotEmpty(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	for {
 		b.lk.rlock()
 		if b.closed {
@@ -394,8 +433,9 @@ func (b *btreeBacking[T]) NotEmpty(ctx context.Context) error {
 			return ErrClosed
 		}
 		if b.tree.Len() > 0 {
+			err := runSideEffect(opts.sideEffect)
 			b.lk.runlock()
-			return nil
+			return err
 		}
 		if err := b.notEmpty.Wait(ctx, b.lk.runlock); err != nil {
 			return b.closedOrCause(ctx)
@@ -404,7 +444,11 @@ func (b *btreeBacking[T]) NotEmpty(ctx context.Context) error {
 }
 
 // NotFull implements Backing.NotFull().
-func (b *btreeBacking[T]) NotFull(ctx context.Context) error {
+func (b *btreeBacking[T]) NotFull(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	for {
 		b.lk.rlock()
 		if b.closed {
@@ -412,8 +456,9 @@ func (b *btreeBacking[T]) NotFull(ctx context.Context) error {
 			return ErrClosed
 		}
 		if b.maxSize == 0 || b.tree.Len() < b.maxSize {
+			err := runSideEffect(opts.sideEffect)
 			b.lk.runlock()
-			return nil
+			return err
 		}
 		if err := b.notFull.Wait(ctx, b.lk.runlock); err != nil {
 			return b.closedOrCause(ctx)
@@ -443,13 +488,23 @@ func (b *btreeBacking[T]) closedOrCause(ctx context.Context) error {
 }
 
 // Close implements Backing.Close().
-func (b *btreeBacking[T]) Close(ctx context.Context) error {
+func (b *btreeBacking[T]) Close(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	b.lk.lock()
 	if b.closed {
+		err := runSideEffect(opts.sideEffect)
 		b.lk.unlock()
-		return nil
+		return err
 	}
-	var err error
+	// The side effect runs before the close takes effect; a failure aborts the close and
+	// the backing stays open.
+	if err := runSideEffect(opts.sideEffect); err != nil {
+		b.lk.unlock()
+		return err
+	}
 	if b.backup != nil {
 		err = b.backup.Close(ctx)
 	}
@@ -461,14 +516,23 @@ func (b *btreeBacking[T]) Close(ctx context.Context) error {
 }
 
 // Clear implements Backing.Clear().
-func (b *btreeBacking[T]) Clear(ctx context.Context) error {
+func (b *btreeBacking[T]) Clear(ctx context.Context, options ...OpOption) error {
+	opts, err := resolveOpOptions(options)
+	if err != nil {
+		return err
+	}
 	b.lk.lock()
 	defer b.lk.unlock()
 	if b.closed {
 		return ErrClosed
 	}
 	if b.tree.Len() == 0 {
-		return nil
+		return runSideEffect(opts.sideEffect)
+	}
+	// The side effect and backup clear both run before the items are dropped, so a
+	// failure of either aborts with nothing removed.
+	if err := runSideEffect(opts.sideEffect); err != nil {
+		return err
 	}
 	if b.backup != nil {
 		if err := b.backup.Clear(ctx); err != nil {
