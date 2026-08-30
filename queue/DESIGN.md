@@ -105,6 +105,12 @@ are easy to change apart from one another:
 An implementation must keep the two order-consistent: if `a.Less(b)` then `a.Priority() > b.Priority()`.
 A type that flips one without the other sorts one way in memory and the other way on disk.
 
+That clause binds only items destined for a **priority** queue. A FIFO item must report
+`Priority() == 0`, which makes the implication unsatisfiable for any `Less` that orders two items
+strictly — and harmless, because no FIFO backing calls `Less`: `btree.NewFIFO` uses
+`core.FifoSeqLess` (insert sequence only) and `bbolt`'s `fifoKey` discards the item entirely. A FIFO
+item may implement `Less` however it likes.
+
 `Priority() == 0` is reserved as the queue-kind gate — a priority queue rejects it
 (`ErrPriorityRequired`), a FIFO queue requires it (`ErrPriorityNotAllowed`) — so it is not usable as
 a "lowest priority" value. The lowest a priority queue accepts is `1`.

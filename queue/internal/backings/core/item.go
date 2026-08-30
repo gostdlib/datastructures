@@ -30,6 +30,12 @@ type Item[T any] interface {
 	// a.Priority() > b.Priority(); items with equal Priority are ordered by insert
 	// sequence.
 	//
+	// That ordering clause binds only items destined for a priority queue. A FIFO item
+	// must return 0, which makes the clause unsatisfiable for any Less that orders two
+	// items strictly -- and harmless, because no FIFO backing consults Less at all: they
+	// order by insert sequence alone. A FIFO item is free to implement Less however it
+	// likes, including as a constant false.
+	//
 	// Items pushed onto a priority queue must return a value > 0; items pushed onto a
 	// FIFO queue must return 0 (the queue rejects a Push that violates this). Zero is
 	// reserved for that queue-kind gate, so it is not usable as a "lowest priority"

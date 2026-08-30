@@ -30,7 +30,8 @@ const Unlimited = core.Unlimited
 // supply four methods:
 //
 //   - Less(T) bool: reports whether the receiver sorts before the argument. Must be
-//     order-consistent with Priority.
+//     order-consistent with Priority, but only for items destined for a priority queue:
+//     FIFO backings order by insert sequence and never call Less.
 //   - Equal(T) bool: value identity, used by Exists and Del. Must be consistent with Hash.
 //   - Priority() uint64: the priority sort key. A higher value is more desirable and is
 //     dequeued sooner. Items pushed onto a priority queue must return > 0; items pushed
