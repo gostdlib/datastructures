@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"sort"
 	"testing"
 
@@ -16,9 +17,12 @@ import (
 // fifoItem builds a pushable item for a FIFO backing (priority must be 0).
 func fifoItem(v int) Number[int] { return Number[int]{V: v} }
 
-// prioItem builds a pushable item for a priority backing. P is strictly increasing in v
-// and > 0, so pop-by-priority equals ascending value order.
-func prioItem(v int) Number[int] { return Number[int]{V: v, P: uint64(v) + 1} }
+// prioItem builds a pushable item for a priority backing. A higher P is dequeued sooner, so P
+// is strictly *decreasing* in v -- and still > 0, since every v in these tests is a byte value.
+// That keeps pop-by-priority equal to ascending value order, which is what the assertions
+// throughout this package are written against. TestPriorityOrderIsDescending covers the
+// convention itself, without going through this helper.
+func prioItem(v int) Number[int] { return Number[int]{V: v, P: ^uint64(v)} }
 
 // queryItem builds an item for Exists/Del lookups; only V (Equal/Hash) is consulted.
 func queryItem(v int) Number[int] { return Number[int]{V: v} }
@@ -418,4 +422,129 @@ func sortedQueueVals(t *testing.T, ctx context.Context, q *Queue[Number[int]]) [
 	}
 	sort.Ints(got)
 	return got
+}
+
+// TestPriorityOrderIsDescending pins the package's ordering convention: a higher Priority is more
+// desirable and is dequeued sooner. Every other priority test in this package goes through
+// prioItem, which inverts P so that pop order equals ascending value -- convenient for those
+// assertions, but it means none of them would notice if the convention flipped back. This test
+// uses explicit P values and asserts on P directly.
+//
+// Both backing kinds are covered because they reach the ordering by different routes: the
+// in-memory backings sort through Item.Less, while the on-disk backing sorts by the byte-ordered
+// key priorityKey builds from Item.Priority. A change to either alone would be caught here.
+func TestPriorityOrderIsDescending(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		backing func(t *testing.T, ctx context.Context) (Backing[Number[int]], error)
+	}{
+		{
+			name: "Success: an in-memory priority backing pops the highest priority first",
+			backing: func(t *testing.T, ctx context.Context) (Backing[Number[int]], error) {
+				return memPriority(false)
+			},
+		},
+		{
+			name: "Success: an on-disk priority backing pops the highest priority first",
+			backing: func(t *testing.T, ctx context.Context) (Backing[Number[int]], error) {
+				return NewBboltPriority[Number[int]](ctx, diskRoot(t))
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
+
+			b, err := test.backing(t, ctx)
+			if err != nil {
+				t.Fatalf("TestPriorityOrderIsDescending(%s): backing got err == %s, want err == nil", test.name, err)
+			}
+			q, err := New[Number[int]](ctx, "test", b, 0)
+			if err != nil {
+				t.Fatalf("TestPriorityOrderIsDescending(%s): New got err == %s, want err == nil", test.name, err)
+			}
+			defer q.Close(ctx)
+
+			// Pushed in an order that is neither ascending nor descending in P, so passing
+			// cannot be an artifact of insertion order.
+			if _, err := q.Push(ctx, []Number[int]{{V: 1, P: 10}, {V: 3, P: 30}, {V: 2, P: 20}}); err != nil {
+				t.Fatalf("TestPriorityOrderIsDescending(%s): Push got err == %s, want err == nil", test.name, err)
+			}
+
+			items, err := q.Pop(ctx, 3)
+			if err != nil {
+				t.Fatalf("TestPriorityOrderIsDescending(%s): Pop got err == %s, want err == nil", test.name, err)
+			}
+			got := make([]uint64, 0, len(items))
+			for _, it := range items {
+				got = append(got, it.P)
+			}
+			want := []uint64{30, 20, 10}
+			if !slices.Equal(got, want) {
+				t.Errorf("TestPriorityOrderIsDescending(%s): popped priorities == %v, want %v", test.name, got, want)
+			}
+		})
+	}
+}
+
+// TestPriorityTiesBreakByInsertOrder pins the other half of the contract: items with equal
+// Priority are ordered by insert sequence, which the inverted priorityKey must not disturb.
+func TestPriorityTiesBreakByInsertOrder(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		backing func(t *testing.T, ctx context.Context) (Backing[Number[int]], error)
+	}{
+		{
+			name: "Success: an in-memory priority backing breaks ties by insert order",
+			backing: func(t *testing.T, ctx context.Context) (Backing[Number[int]], error) {
+				return memPriority(false)
+			},
+		},
+		{
+			name: "Success: an on-disk priority backing breaks ties by insert order",
+			backing: func(t *testing.T, ctx context.Context) (Backing[Number[int]], error) {
+				return NewBboltPriority[Number[int]](ctx, diskRoot(t))
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
+
+			b, err := test.backing(t, ctx)
+			if err != nil {
+				t.Fatalf("TestPriorityTiesBreakByInsertOrder(%s): backing got err == %s, want err == nil", test.name, err)
+			}
+			q, err := New[Number[int]](ctx, "test", b, 0)
+			if err != nil {
+				t.Fatalf("TestPriorityTiesBreakByInsertOrder(%s): New got err == %s, want err == nil", test.name, err)
+			}
+			defer q.Close(ctx)
+
+			for _, v := range []int{7, 8, 9} {
+				if _, err := q.Push(ctx, []Number[int]{{V: v, P: 5}}); err != nil {
+					t.Fatalf("TestPriorityTiesBreakByInsertOrder(%s): Push(%d) got err == %s, want err == nil", test.name, v, err)
+				}
+			}
+
+			items, err := q.Pop(ctx, 3)
+			if err != nil {
+				t.Fatalf("TestPriorityTiesBreakByInsertOrder(%s): Pop got err == %s, want err == nil", test.name, err)
+			}
+			got := make([]int, 0, len(items))
+			for _, it := range items {
+				got = append(got, it.V)
+			}
+			want := []int{7, 8, 9}
+			if !slices.Equal(got, want) {
+				t.Errorf("TestPriorityTiesBreakByInsertOrder(%s): popped values == %v, want %v", test.name, got, want)
+			}
+		})
+	}
 }

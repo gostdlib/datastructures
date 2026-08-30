@@ -38,8 +38,8 @@ func TestStringItem(t *testing.T) {
 		t.Errorf("TestStringItem: String{x}.Equal(String{y}) = true, want false")
 	case a.Hash() != b.Hash():
 		t.Errorf("TestStringItem: equal values hashed differently (%d vs %d)", a.Hash(), b.Hash())
-	case !a.Less(b) && a.P < b.P:
-		t.Errorf("TestStringItem: Less must compare P: a.P=%d b.P=%d", a.P, b.P)
+	case !b.Less(a):
+		t.Errorf("TestStringItem: Less must compare P with a higher P first: a.P=%d b.P=%d", a.P, b.P)
 	case a.Priority() != 1:
 		t.Errorf("TestStringItem: Priority() = %d, want 1", a.Priority())
 	}
@@ -85,8 +85,8 @@ func TestBytesItem(t *testing.T) {
 	if a.Equal(Bytes{V: []byte("y")}) {
 		t.Errorf("TestBytesItem: different bytes reported Equal")
 	}
-	if !a.Less(b) {
-		t.Errorf("TestBytesItem: Less must compare P (2 < 7)")
+	if !b.Less(a) {
+		t.Errorf("TestBytesItem: Less must compare P with a higher P first (7 before 2)")
 	}
 
 	ctx := t.Context()
@@ -98,14 +98,14 @@ func TestBytesItem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TestBytesItem: New got err == %s, want err == nil", err)
 	}
-	// Pushed out of priority order; must pop by ascending P.
+	// Pushed out of priority order; must pop by descending P (a higher P is more desirable).
 	in := []Bytes{{V: []byte("hi"), P: 3}, {V: []byte("lo"), P: 1}, {V: []byte("mid"), P: 2}}
 	for _, it := range in {
 		if ok, err := q.Push(ctx, []Bytes{it}); err != nil || !ok {
 			t.Fatalf("TestBytesItem: Push got (ok=%v err=%v), want (true,nil)", ok, err)
 		}
 	}
-	for _, want := range []string{"lo", "mid", "hi"} {
+	for _, want := range []string{"hi", "mid", "lo"} {
 		items, err := q.Pop(ctx, 1)
 		if err != nil || len(items) != 1 || string(items[0].V) != want {
 			t.Fatalf("TestBytesItem: Pop got (%v,%v), want %q", items, err, want)
@@ -129,8 +129,8 @@ func TestValueItem(t *testing.T) {
 		t.Errorf("TestValueItem: Equaler-based Equal got false, want true")
 	case a.Hash() != b.Hash():
 		t.Errorf("TestValueItem: Hasher-based Hash mismatch (%d vs %d)", a.Hash(), b.Hash())
-	case !a.Less(b):
-		t.Errorf("TestValueItem: Less must compare P (1 < 9)")
+	case !b.Less(a):
+		t.Errorf("TestValueItem: Less must compare P with a higher P first (9 before 1)")
 	case a.Priority() != 1:
 		t.Errorf("TestValueItem: Priority() = %d, want 1", a.Priority())
 	}

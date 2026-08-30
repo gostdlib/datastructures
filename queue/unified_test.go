@@ -88,7 +88,8 @@ func queueMakers() []qMaker {
 }
 
 // TestQueueSequential pushes a shuffled batch into an unbounded queue and verifies the
-// drain order: insertion order for FIFO, ascending priority for priority backings.
+// drain order: insertion order for FIFO, and for priority backings ascending value, which is
+// descending priority under prioItem's inverted encoding.
 func TestQueueSequential(t *testing.T) {
 	pushed := []int{5, 3, 9, 1, 7, 2, 8, 0, 6, 4}
 	for _, m := range queueMakers() {

@@ -25,12 +25,18 @@ type Item[T any] interface {
 	Less(T) bool
 	// Equal returns true if the item is equal to the other item.
 	Equal(T) bool
-	// Priority returns the priority sort key. It must be order-consistent with Less:
-	// if a.Less(b) then a.Priority() < b.Priority(); items with equal Priority are
-	// ordered by insert sequence. Items pushed onto a priority queue must return a
-	// value > 0; items pushed onto a FIFO queue must return 0 (the queue rejects a
-	// Push that violates this). Only consulted by the on-disk priority backing
-	// (NewBboltPriority); other backings sort via Less directly.
+	// Priority returns the priority sort key. A higher value is more desirable and is
+	// dequeued sooner. It must be order-consistent with Less: if a.Less(b) then
+	// a.Priority() > b.Priority(); items with equal Priority are ordered by insert
+	// sequence.
+	//
+	// Items pushed onto a priority queue must return a value > 0; items pushed onto a
+	// FIFO queue must return 0 (the queue rejects a Push that violates this). Zero is
+	// reserved for that queue-kind gate, so it is not usable as a "lowest priority"
+	// value: the lowest priority a priority queue accepts is 1.
+	//
+	// Only consulted by the on-disk priority backing (NewBboltPriority); other backings
+	// sort via Less directly.
 	Priority() uint64
 	// Hash returns a value-derived bucket key for the WithIndex option. It must be
 	// consistent with Equal: if a.Equal(b) then a.Hash() == b.Hash(). Collisions are

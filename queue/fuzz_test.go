@@ -45,8 +45,9 @@ func (m *fifoModel) delMany(vs []int) {
 	}
 }
 
-// prioModel is the reference for a priority queue using prioItem's encoding (P = v+1), so
-// the pop order is ascending value with insertion order breaking ties between equal values.
+// prioModel is the reference for a priority queue using prioItem's encoding (P = ^v, so a
+// higher P and therefore an earlier pop corresponds to a lower v), which makes the pop order
+// ascending value with insertion order breaking ties between equal values.
 type prioModel struct {
 	vals []int
 	seqs []int

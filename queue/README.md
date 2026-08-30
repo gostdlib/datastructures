@@ -101,8 +101,9 @@ for _, it := range items {
 
 ## Priority queue
 
-Items pop in ascending `Priority` regardless of push order; priority items must have
-`Priority > 0`.
+A higher `Priority` is more desirable: items pop in descending `Priority` regardless of push
+order, with insert order breaking ties. Priority items must have `Priority > 0`, so `0` is
+reserved for FIFO queues and the lowest usable priority is `1`.
 
 ```go
 b, _ := queue.NewPriority[queue.Number[int]]()
@@ -111,7 +112,7 @@ defer q.Close(ctx)
 
 q.Push(ctx, []queue.Number[int]{{V: 30, P: 30}, {V: 10, P: 10}, {V: 20, P: 20}})
 items, _ := q.Pop(ctx, 3)
-// items pop as 10, 20, 30
+// items pop as 30, 20, 10
 ```
 
 ## Peek

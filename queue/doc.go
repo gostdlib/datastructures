@@ -21,8 +21,9 @@
 //
 // WithIndex enables an in-memory hash index for O(1) Exists / O(log n) Del; it is
 // honored by the keyed B-Tree backings and the BoltDB backings. WithBTreeWidth tunes
-// the keyed B-Tree backings. Priority backings order items by their Less method;
-// FIFO backings order by insertion. Items pushed onto a priority queue must report
+// the keyed B-Tree backings. Priority backings order items by their Less method, under
+// the convention that a higher priority is more desirable and is dequeued sooner; FIFO
+// backings order by insertion. Items pushed onto a priority queue must report
 // Priority() > 0; items pushed onto a FIFO queue must report Priority() == 0.
 //
 // Built-in Item implementations (Number, String, Bytes, Value) cover the common cases;

@@ -32,9 +32,11 @@ const Unlimited = core.Unlimited
 //   - Less(T) bool: reports whether the receiver sorts before the argument. Must be
 //     order-consistent with Priority.
 //   - Equal(T) bool: value identity, used by Exists and Del. Must be consistent with Hash.
-//   - Priority() uint64: the priority sort key. Items pushed onto a priority queue must
-//     return > 0; items pushed onto a FIFO queue must return 0. Only the on-disk priority
-//     backing orders by it directly; the others sort via Less.
+//   - Priority() uint64: the priority sort key. A higher value is more desirable and is
+//     dequeued sooner. Items pushed onto a priority queue must return > 0; items pushed
+//     onto a FIFO queue must return 0, so 0 is reserved for that gate and the lowest
+//     usable priority is 1. Only the on-disk priority backing orders by it directly; the
+//     others sort via Less.
 //   - Hash() uint64: a value-derived bucket key for WithIndex. If a.Equal(b) then
 //     a.Hash() == b.Hash(). Collisions are allowed; Equal still confirms a match.
 //

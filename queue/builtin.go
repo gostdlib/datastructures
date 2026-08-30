@@ -35,15 +35,17 @@ type NumberConstraint interface {
 type Number[T NumberConstraint] struct {
 	// V is the underlying value.
 	V T
-	// P is the priority of the item. Set P > 0 to use this in a priority queue; leave
-	// P == 0 for a FIFO queue. A priority queue rejects items with P == 0
-	// (ErrPriorityRequired); a FIFO queue rejects items with P > 0 (ErrPriorityNotAllowed).
+	// P is the priority of the item. A higher P is more desirable and is dequeued sooner.
+	// Set P > 0 to use this in a priority queue; leave P == 0 for a FIFO queue. A priority
+	// queue rejects items with P == 0 (ErrPriorityRequired); a FIFO queue rejects items with
+	// P > 0 (ErrPriorityNotAllowed). Because 0 is reserved for that gate, the lowest priority
+	// a priority queue accepts is 1.
 	P uint64
 }
 
-// Less implements Item.Less by comparing the priorities.
+// Less implements Item.Less by comparing the priorities. A higher P sorts first.
 func (u Number[T]) Less(other Number[T]) bool {
-	return u.P < other.P
+	return u.P > other.P
 }
 
 // Equal implements Item.Equal by comparing the underlying values for equality.
@@ -79,15 +81,17 @@ func (u Number[T]) Hash() uint64 {
 type String struct {
 	// V is the underlying value.
 	V string
-	// P is the priority of the item. Set P > 0 to use this in a priority queue; leave
-	// P == 0 for a FIFO queue. A priority queue rejects items with P == 0
-	// (ErrPriorityRequired); a FIFO queue rejects items with P > 0 (ErrPriorityNotAllowed).
+	// P is the priority of the item. A higher P is more desirable and is dequeued sooner.
+	// Set P > 0 to use this in a priority queue; leave P == 0 for a FIFO queue. A priority
+	// queue rejects items with P == 0 (ErrPriorityRequired); a FIFO queue rejects items with
+	// P > 0 (ErrPriorityNotAllowed). Because 0 is reserved for that gate, the lowest priority
+	// a priority queue accepts is 1.
 	P uint64
 }
 
-// Less implements Item.Less by comparing the priorities.
+// Less implements Item.Less by comparing the priorities. A higher P sorts first.
 func (u String) Less(other String) bool {
-	return u.P < other.P
+	return u.P > other.P
 }
 
 // Equal implements Item.Equal by comparing the underlying values for equality.
@@ -109,15 +113,17 @@ func (u String) Hash() uint64 {
 type Bytes struct {
 	// V is the underlying value.
 	V []byte
-	// P is the priority of the item. Set P > 0 to use this in a priority queue; leave
-	// P == 0 for a FIFO queue. A priority queue rejects items with P == 0
-	// (ErrPriorityRequired); a FIFO queue rejects items with P > 0 (ErrPriorityNotAllowed).
+	// P is the priority of the item. A higher P is more desirable and is dequeued sooner.
+	// Set P > 0 to use this in a priority queue; leave P == 0 for a FIFO queue. A priority
+	// queue rejects items with P == 0 (ErrPriorityRequired); a FIFO queue rejects items with
+	// P > 0 (ErrPriorityNotAllowed). Because 0 is reserved for that gate, the lowest priority
+	// a priority queue accepts is 1.
 	P uint64
 }
 
-// Less implements Item.Less by comparing the priorities.
+// Less implements Item.Less by comparing the priorities. A higher P sorts first.
 func (u Bytes) Less(other Bytes) bool {
-	return u.P < other.P
+	return u.P > other.P
 }
 
 // Equal implements Item.Equal by comparing the underlying values for equality.
@@ -148,9 +154,11 @@ func (u Bytes) Hash() uint64 {
 type Value[T any] struct {
 	// V is the underlying value.
 	V T
-	// P is the priority of the item. Set P > 0 to use this in a priority queue; leave
-	// P == 0 for a FIFO queue. A priority queue rejects items with P == 0
-	// (ErrPriorityRequired); a FIFO queue rejects items with P > 0 (ErrPriorityNotAllowed).
+	// P is the priority of the item. A higher P is more desirable and is dequeued sooner.
+	// Set P > 0 to use this in a priority queue; leave P == 0 for a FIFO queue. A priority
+	// queue rejects items with P == 0 (ErrPriorityRequired); a FIFO queue rejects items with
+	// P > 0 (ErrPriorityNotAllowed). Because 0 is reserved for that gate, the lowest priority
+	// a priority queue accepts is 1.
 	P uint64
 	// Equaler reports whether two values are equal. Must be non-nil and consistent with Hasher.
 	Equaler func(T, T) bool
@@ -164,9 +172,9 @@ type Value[T any] struct {
 // NewBboltFIFO/NewBboltPriority to reject a codec-less Value queue with ErrCodecRequired.
 func (Value[T]) requiresDiskCodec() {}
 
-// Less implements Item.Less by comparing the priorities.
+// Less implements Item.Less by comparing the priorities. A higher P sorts first.
 func (u Value[T]) Less(other Value[T]) bool {
-	return u.P < other.P
+	return u.P > other.P
 }
 
 // Equal implements Item.Equal using the caller-supplied Equaler.

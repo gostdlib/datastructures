@@ -43,8 +43,9 @@ func Example() {
 	// 3
 }
 
-// Example_priority shows a priority queue: items pop in ascending Item.Priority
-// regardless of push order. Items pushed onto a priority queue must have Priority > 0.
+// Example_priority shows a priority queue: a higher Item.Priority is more desirable, so items
+// pop in descending Item.Priority regardless of push order. Items pushed onto a priority queue
+// must have Priority > 0.
 func Example_priority() {
 	ctx := context.Background()
 
@@ -74,9 +75,9 @@ func Example_priority() {
 		fmt.Println(it.V)
 	}
 	// Output:
-	// 10
-	// 20
 	// 30
+	// 20
+	// 10
 }
 
 // Example_peek shows reading the head item without removing it. queue.String wraps a
