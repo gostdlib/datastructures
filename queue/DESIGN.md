@@ -88,6 +88,33 @@ something the compiler checks.
 the backings look repetitive: the repetition is the contract, and each copy differs in the one
 place its data structure differs.
 
+### Ordering convention
+
+**A higher `Item.Priority()` is more desirable and is dequeued sooner.** That is the rule for the
+whole package, and it is stated here because the code enforces it in two independent places that
+are easy to change apart from one another:
+
+- **`Item.Less`.** The in-memory backings (btree, heap) never consult `Priority()` at all — they
+  order through `core.PrioritySeqLess`, which is `Item.Less` with insert sequence as a tiebreak. The
+  built-in item types encode the convention here, as `u.P > other.P`.
+- **`bbolt.priorityKey`.** The on-disk backing is the only one that reads `Priority()` directly. It
+  stores the **complement** of the priority, because bbolt walks keys in ascending byte order, so
+  complementing is what puts the highest priority at the head. The sequence half is stored as-is,
+  keeping ties FIFO.
+
+An implementation must keep the two order-consistent: if `a.Less(b)` then `a.Priority() > b.Priority()`.
+A type that flips one without the other sorts one way in memory and the other way on disk.
+
+That clause binds only items destined for a **priority** queue. A FIFO item must report
+`Priority() == 0`, which makes the implication unsatisfiable for any `Less` that orders two items
+strictly — and harmless, because no FIFO backing calls `Less`: `btree.NewFIFO` uses
+`core.FifoSeqLess` (insert sequence only) and `bbolt`'s `fifoKey` discards the item entirely. A FIFO
+item may implement `Less` however it likes.
+
+`Priority() == 0` is reserved as the queue-kind gate — a priority queue rejects it
+(`ErrPriorityRequired`), a FIFO queue requires it (`ErrPriorityNotAllowed`) — so it is not usable as
+a "lowest priority" value. The lowest a priority queue accepts is `1`.
+
 ### Construction order in `New`
 
 1. Reject a nil backing.
@@ -754,8 +781,10 @@ of truth.**
 | priority | big-endian `Item.Priority()` ‖ big-endian sequence | 16 bytes |
 
 bbolt iterates keys byte-lexicographically, so the head of the queue is the bucket's first key:
-insert order for FIFO, lowest priority (insert order breaking ties) for priority. The 16-byte
-priority key is fixed-width and therefore inherently prefix-free.
+insert order for FIFO, highest priority (insert order breaking ties) for priority. The priority
+half of the key is stored complemented, which is what turns "highest priority" into "smallest
+key"; the sequence half is stored as-is so ties stay FIFO. The 16-byte priority key is
+fixed-width and therefore inherently prefix-free.
 
 `bolt.Open` takes bbolt's **process-wide file lock**. By default the wait is unbounded and `ctx`
 does not bound it (`bolt.Open` has no context), so a second handle on the same root blocks until
@@ -931,7 +960,7 @@ One case it cannot reach: a Push already waiting on an in-flight batch at that m
 #### `Pop` — one transaction
 
 Peek + mirror + delete must be **one `db.Update`**: `commit` runs `db.Update` without holding
-`p.lk`, so a separate read transaction could see a lower-priority item inserted between the peek
+`p.lk`, so a separate read transaction could see a higher-priority item inserted between the peek
 and the delete.
 
 Inside the transaction: pass 1 decodes the first `k` items in order (each decode guarded, since the
@@ -1137,7 +1166,7 @@ Two properties recur and are worth stating once:
 | `unwindMakers(t)` | `unwind_equivalence_test.go` | Exactly one maker per **source file** (`fifo-slice`, `fifo-btype`, `fifo-btree+index`, `priority-heap`, `fifo-bbolt`), selected **by name** and `t.Fatal`-ing if a name goes missing, so a rename is a failure rather than a silent hole. |
 | `backingConfigs()` | `queue_test.go` | Older 12-config matrix (bounded/unbounded × kind × index) used by `TestBackingsConformance`. |
 | `fakeBackup` | `backup_test.go` | In-memory `Backup[Number[int]]`. No internal locking — backings call it single-threaded under the queue lock. Carries `pushErr`/`delErr`/`restoreErr`/`onLoadErr` for returned failures and `pushHook`/`delHook`/`closeHook`/`clearHook`/`pushCtxHook` for arbitrary failure modes, so a harness can hold "how it fails" as data. `pushCtxHook` is the only way to observe the context the queue hands a `Backup`. |
-| `fifoItem` / `prioItem` / `queryItem` / `itemFor` | `queue_test.go` | `Number[int]` builders. `prioItem(v)` sets `P = v+1`, so pop-by-priority equals ascending value. |
+| `fifoItem` / `prioItem` / `queryItem` / `itemFor` | `queue_test.go` | `Number[int]` builders. `prioItem(v)` sets `P = ^v` — a higher `P` pops sooner, so inverting keeps pop-by-priority equal to ascending value. The convention itself is pinned by `TestPriorityOrderIsDescending`, which bypasses this helper. |
 | `diskRoot(t)` | `queue_test.go` | `os.OpenRoot(t.TempDir())`. |
 | `sideEffectUnwinds()` | `sideeffect_unwind_test.go` | `normal` / `panic` / `Goexit`. |
 | `failureModes()` | `unwind_equivalence_test.go` | `returns nil` (marked `succeeds`) / `returns an error` / `panics` / `calls runtime.Goexit`. |
@@ -1153,7 +1182,7 @@ Two properties recur and are worth stating once:
 | Test | File | Purpose |
 |---|---|---|
 | `TestBackingsConformance` | `queue_test.go` | The broad API sweep over 12 configs: Push/Len/Peek/Exists, pop order, `Del` removing **all** `Equal` matches with the count being *entries removed* (one query removing two 7s reports 2; a duplicated query does not double-count), the three no-op `Del` shapes reporting 0 with a nil error, `RangeAll` order, `Clear`, `Close`. |
-| `TestQueueSequential` | `unified_test.go` | Shuffled batch in, drain order out: insertion order for FIFO, ascending priority otherwise. |
+| `TestQueueSequential` | `unified_test.go` | Shuffled batch in, drain order out: insertion order for FIFO, ascending value otherwise (descending priority, under `prioItem`'s inverted encoding). |
 | `TestQueueEmpty` | `unified_test.go` | Empty-queue behaviour: `Peek` not-found; blocked `Pop`/`NotEmpty` return on ctx cancel; a `Pop` blocked on empty unblocks on a concurrent Push. |
 | `TestQueueFull` | `unified_test.go` | Bounded behaviour: Push blocks until space or cancel, `NotFull` errors on a cancelled ctx when full, an over-bound batch is `ErrBatchTooLarge`. |
 | `TestQueueConcurrent` | `unified_test.go` | Many producers/consumers against an unbounded and a small bounded queue: every value delivered exactly once, no loss, duplication or deadlock. |
@@ -1327,7 +1356,7 @@ only issued when the model is non-empty so Pop never waits.
 | Fuzz target | Model |
 |---|---|
 | `FuzzFIFO` | `fifoModel` — values in insertion order. |
-| `FuzzPriority` | `prioModel` — `prioItem`'s encoding (`P = v+1`), so pop order is ascending value with insertion order breaking ties. |
+| `FuzzPriority` | `prioModel` — `prioItem`'s encoding (`P = ^v`), so pop order is ascending value with insertion order breaking ties. |
 
 ### 16.14 Examples
 

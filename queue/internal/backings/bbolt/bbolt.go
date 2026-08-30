@@ -107,12 +107,15 @@ type diskCodecRequirer interface {
 // bboltBacking is an on-disk queue backed by go.etcd.io/bbolt, used for both FIFO and
 // priority. Each item is stored in the "items" bucket under a key built by keyOf:
 //   - FIFO:     8-byte big-endian per-bucket sequence number
-//   - priority: 8-byte big-endian Item.Priority() followed by the 8-byte sequence number
+//   - priority: 8-byte big-endian complement of Item.Priority() followed by the 8-byte
+//     sequence number
 //
 // bbolt iterates keys in byte-lexicographic order, so the head of the queue is the
-// bucket's first key: insert order for FIFO, lowest Item.Priority value (insert order
-// breaking ties) for priority. The priority key is a fixed 16 bytes, so it is inherently
-// prefix-free.
+// bucket's first key: insert order for FIFO, highest Item.Priority value (insert order
+// breaking ties) for priority. The complement is what makes the second of those true --
+// a higher priority is more desirable, and complementing turns "highest priority" into
+// "smallest key" without disturbing the sequence half. The priority key is a fixed 16
+// bytes, so it is inherently prefix-free.
 //
 // Items are encoded with github.com/go-json-experiment/json. Recovery is automatic: on
 // Open the existing database is the source of truth.
@@ -297,11 +300,15 @@ func fifoKey[T core.Item[T]](_ T, seq uint64) []byte {
 	return out
 }
 
-// priorityKey orders by Item.Priority() with insert sequence as a tiebreak. The
-// fixed 16-byte width (8-byte priority || 8-byte seq) is inherently prefix-free.
+// priorityKey orders by Item.Priority() with insert sequence as a tiebreak. A higher
+// Priority is more desirable, and bbolt walks keys in ascending byte order, so the
+// priority half is stored complemented: the largest Priority becomes the smallest eight
+// bytes and sorts to the head. The sequence half is stored as-is, so items sharing a
+// priority still come out in insert order. The fixed 16-byte width (8-byte complemented
+// priority || 8-byte seq) is inherently prefix-free.
 func priorityKey[T core.Item[T]](v T, seq uint64) []byte {
 	out := make([]byte, 16)
-	binary.BigEndian.PutUint64(out[:8], v.Priority())
+	binary.BigEndian.PutUint64(out[:8], ^v.Priority())
 	binary.BigEndian.PutUint64(out[8:], seq)
 	return out
 }
@@ -875,7 +882,7 @@ func (p *Backing[T]) Pop(ctx context.Context, n int, options ...core.OpOption) (
 			}
 			// Peek + mirror + delete must be one transaction: the flush goroutine's
 			// commit() runs db.Update without holding p.lk, so a separate read txn
-			// could see a lower-priority item inserted between the peek and the delete.
+			// could see a higher-priority item inserted between the peek and the delete.
 			backupDeleted := false
 			err := p.db.Update(func(tx *bolt.Tx) error {
 				c := tx.Bucket(itemsBucket).Cursor()
