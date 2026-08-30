@@ -2,13 +2,14 @@ package btype
 
 import (
 	"fmt"
-	"github.com/gostdlib/datastructures/queue/internal/backings/core"
 	"iter"
+
+	"github.com/gostdlib/datastructures/queue/internal/backings/core"
 
 	"github.com/gostdlib/base/context"
 )
 
-// btypeFIFO is an in-memory FIFO queue backed by the positional copy-on-write B-tree in
+// Backing is an in-memory FIFO queue backed by the positional copy-on-write B-tree in
 // btype_btree.go (PushBack/PopFront), which avoids the comparator descent and core.SeqItem
 // wrapper of the tidwall/btree-based FIFO. Semantics (blocking, hydration, backup mirror)
 // mirror fifo. lk and maxSize are injected by New via SetQueueLock and SetMaxSize before
@@ -35,7 +36,7 @@ type Backing[T core.Item[T]] struct {
 	backup   core.Backup[T]
 }
 
-// newBtypeFIFO returns an in-memory FIFO Backing backed by the positional B-tree. It is the
+// New returns an in-memory FIFO Backing backed by the positional B-tree. It is the
 // backing NewBTreeFIFO uses when WithIndex is not set: unbounded-friendly with cheap
 // push/pop and O(n) Exists/Del.
 func New[T core.Item[T]]() (core.Backing[T], error) {
