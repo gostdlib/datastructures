@@ -1,7 +1,7 @@
 // Note: This is copied from https://github.com/tidwall/btype .
 // Josh is a genius.  Copyrighted MIT and this is from: 2b83c515df571c29c78f3fa4b3ea6332ef8e3f02
 
-package queue
+package btype
 
 import (
 	"iter"
@@ -14,14 +14,14 @@ const maxItems = fanout - 1
 const minItems = maxItems / 2
 
 type tree[K, V any] struct {
-	copied      bool        // Copy called at least once during life of tree.
-	strprefix   bool        // Use string prefixes, K _MUST_ be a string.
-	initd       bool        // Flag used by outer types
-	alt         bool        // Flag used by outer types
-	nopre       bool        // Flag used by outer types
-	stdops      bool        // Flag used by outer types
-	count       int         // total tree count
-	root        *node[K, V] // root node
+	copied    bool        // Copy called at least once during life of tree.
+	strprefix bool        // Use string prefixes, K _MUST_ be a string.
+	initd     bool        // Flag used by outer types
+	alt       bool        // Flag used by outer types
+	nopre     bool        // Flag used by outer types
+	stdops    bool        // Flag used by outer types
+	count     int         // total tree count
+	root      *node[K, V] // root node
 	// spare holds an empty, exclusively-owned leaf that survived a Pop-to-empty.
 	// insertFirstItem reuses it instead of allocating a fresh ~1KB leaf on every
 	// empty->1 cycle (FIFO workloads that intermittently drain). Only populated by

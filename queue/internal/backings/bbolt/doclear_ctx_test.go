@@ -1,9 +1,11 @@
-package queue
+package bbolt
 
 import (
-	"context"
 	"iter"
 	"testing"
+
+	"github.com/gostdlib/base/context"
+	"github.com/gostdlib/datastructures/queue/internal/backings/core"
 )
 
 // fakeCtxBackup implements Backup. Push records the ctx it is called with and fails
@@ -13,18 +15,18 @@ type fakeCtxBackup struct {
 	pushCtxs []context.Context
 }
 
-func (b *fakeCtxBackup) Push(ctx context.Context, _ []Number[int]) error {
+func (b *fakeCtxBackup) Push(ctx context.Context, _ []num) error {
 	b.pushCtxs = append(b.pushCtxs, ctx)
 	return ctx.Err()
 }
-func (b *fakeCtxBackup) Del(context.Context, []Number[int]) error     { return nil }
-func (b *fakeCtxBackup) Restore(context.Context, []Number[int]) error { return nil }
-func (b *fakeCtxBackup) Len() int64                                   { return 0 }
-func (b *fakeCtxBackup) Close(context.Context) error                  { return nil }
-func (b *fakeCtxBackup) Clear(context.Context) error                  { return nil }
-func (b *fakeCtxBackup) OnLoad(context.Context, Number[int]) error    { return nil }
-func (b *fakeCtxBackup) RangeAll(context.Context) iter.Seq2[Number[int], error] {
-	return func(yield func(Number[int], error) bool) {}
+func (b *fakeCtxBackup) Del(context.Context, []num) error     { return nil }
+func (b *fakeCtxBackup) Restore(context.Context, []num) error { return nil }
+func (b *fakeCtxBackup) Len() int64                           { return 0 }
+func (b *fakeCtxBackup) Close(context.Context) error          { return nil }
+func (b *fakeCtxBackup) Clear(context.Context) error          { return nil }
+func (b *fakeCtxBackup) OnLoad(context.Context, num) error    { return nil }
+func (b *fakeCtxBackup) RangeAll(context.Context) iter.Seq2[num, error] {
+	return func(yield func(num, error) bool) {}
 }
 
 // TestBboltDoClearDrainUsesFlusherCtx is a regression test: doClear's drain step
@@ -40,16 +42,16 @@ func (b *fakeCtxBackup) RangeAll(context.Context) iter.Seq2[Number[int], error] 
 // a nil err.
 func TestBboltDoClearDrainUsesFlusherCtx(t *testing.T) {
 	ctx := t.Context()
-	o, err := applyBackingOptions(callBboltFIFO, nil)
+	o, err := core.ApplyBackingOptions(core.CallBboltFIFO, nil)
 	if err != nil {
-		t.Fatalf("TestBboltDoClearDrainUsesFlusherCtx: applyBackingOptions got err == %s, want err == nil", err)
+		t.Fatalf("TestBboltDoClearDrainUsesFlusherCtx: core.ApplyBackingOptions got err == %s, want err == nil", err)
 	}
-	bk, err := newBboltBacking[Number[int]](ctx, diskRoot(t), o, bboltFIFOKey[Number[int]], false)
+	bk, err := newBacking[num](ctx, diskRoot(t), o, fifoKey[num], false)
 	if err != nil {
-		t.Fatalf("TestBboltDoClearDrainUsesFlusherCtx: newBboltBacking got err == %s, want err == nil", err)
+		t.Fatalf("TestBboltDoClearDrainUsesFlusherCtx: newBacking got err == %s, want err == nil", err)
 	}
-	p := bk.(*bboltBacking[Number[int]])
-	// setQueueLock is intentionally not called: the flusher stays offline so doClear
+	p := bk.(*Backing[num])
+	// SetQueueLock is intentionally not called: the flusher stays offline so doClear
 	// is the only goroutine driving commit, and there is no race with a real flush.
 	t.Cleanup(func() { _ = p.Close(ctx) })
 
@@ -58,16 +60,16 @@ func TestBboltDoClearDrainUsesFlusherCtx(t *testing.T) {
 
 	// Manually stage an item the way a Push would: append to p.buf, bump inflight,
 	// remember the current cur so we can read its err after the drain.
-	p.lk.lock()
-	p.buf = []Number[int]{fifoItem(1)}
+	p.lk.Lock()
+	p.buf = []num{num{V: 1}}
 	p.inflight = 1
 	bufCur := p.cur
-	p.lk.unlock()
+	p.lk.Unlock()
 
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
 
-	_ = p.doClear(cctx, nil) // doClear's own backup.Clear/db.Update may run under cctx; not asserted here.
+	_ = p.doClear(cctx, nil, &codeSubject{}) // doClear's own backup.Clear/db.Update may run under cctx; not asserted here.
 
 	<-bufCur.done
 	if bufCur.err != nil {
@@ -98,16 +100,16 @@ func TestBboltDoClearCanceledCtx(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		o, err := applyBackingOptions(callBboltFIFO, nil)
+		o, err := core.ApplyBackingOptions(core.CallBboltFIFO, nil)
 		if err != nil {
-			t.Fatalf("TestBboltDoClearCanceledCtx(%s): applyBackingOptions got err == %s, want err == nil", test.name, err)
+			t.Fatalf("TestBboltDoClearCanceledCtx(%s): core.ApplyBackingOptions got err == %s, want err == nil", test.name, err)
 		}
-		bk, err := newBboltBacking[Number[int]](ctx, diskRoot(t), o, bboltFIFOKey[Number[int]], false)
+		bk, err := newBacking[num](ctx, diskRoot(t), o, fifoKey[num], false)
 		if err != nil {
-			t.Fatalf("TestBboltDoClearCanceledCtx(%s): newBboltBacking got err == %s, want err == nil", test.name, err)
+			t.Fatalf("TestBboltDoClearCanceledCtx(%s): newBacking got err == %s, want err == nil", test.name, err)
 		}
-		p := bk.(*bboltBacking[Number[int]])
-		// setQueueLock is intentionally not called: the flusher stays offline so doClear
+		p := bk.(*Backing[num])
+		// SetQueueLock is intentionally not called: the flusher stays offline so doClear
 		// is the only goroutine driving commit.
 		t.Cleanup(func() { _ = p.Close(ctx) })
 
@@ -119,7 +121,7 @@ func TestBboltDoClearCanceledCtx(t *testing.T) {
 		}
 
 		ran := false
-		err = p.doClear(cctx, func() error { ran = true; return nil })
+		err = p.doClear(cctx, func() error { ran = true; return nil }, &codeSubject{})
 		switch {
 		case err == nil && test.wantErr:
 			t.Errorf("TestBboltDoClearCanceledCtx(%s): got err == nil, want err != nil", test.name)

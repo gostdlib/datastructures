@@ -27,6 +27,8 @@ import (
 	"context"
 	"os"
 	"testing"
+
+	"github.com/gostdlib/datastructures/queue/internal/backings/btype"
 )
 
 // signalBackingMaker constructs a Backing for the bench. priority selects the
@@ -48,9 +50,9 @@ func signalBackingMakers() []signalBackingMaker {
 			return bk
 		}},
 		{"fifo-btype", false, false, func(b *testing.B, _ context.Context) Backing[Number[int]] {
-			bk, err := newBtypeFIFO[Number[int]]()
+			bk, err := btype.New[Number[int]]()
 			if err != nil {
-				b.Fatalf("newBtypeFIFO: %v", err)
+				b.Fatalf("btype.New: %v", err)
 			}
 			return bk
 		}},

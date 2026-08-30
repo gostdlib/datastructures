@@ -5,62 +5,9 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/gostdlib/datastructures/queue/internal/backings/core"
 )
-
-// BackingOption is an optional argument to a backing constructor. A single option type is
-// shared across constructors; each option validates against the constructor it is given
-// (backingOpts.call) and returns an error if it is not valid there.
-type BackingOption func(backingOpts) (backingOpts, error)
-
-// backingCall identifies which backing constructor a BackingOption is being applied to,
-// so a single shared option type can reject use with a constructor it does not support.
-type backingCall uint8
-
-const (
-	unknownCall       backingCall = 0
-	callBTreeFIFO     backingCall = 1 // NewBTreeFIFO
-	callBTreePriority backingCall = 2 // NewBTreePriority
-	callBboltFIFO     backingCall = 3 // NewBboltFIFO
-	callBboltPriority backingCall = 4 // NewBboltPriority
-)
-
-// backingOpts is the construction-time settings shared by the backing constructors. call
-// records which constructor is applying the options so each option can validate it.
-type backingOpts struct {
-	call  backingCall
-	width int
-	index bool
-
-	// bbolt-only settings, applied to bolt.Options at open.
-	boltNoSync          bool
-	boltNoFreelistSync  bool
-	boltNoGrowSync      bool
-	boltPreLoadFreelist bool
-	boltFreelistMap     bool
-	boltMlock           bool
-	boltMmapFlags       int
-	boltInitialMmapSize int
-	boltPageSize        int
-	boltTimeout         time.Duration
-	boltOpenFile        func(string, int, os.FileMode) (*os.File, error)
-
-	// codecEncode and codecDecode hold the WithCodec funcs. They are stored as any
-	// because BackingOption is not generic; newBboltBacking type-asserts them back to
-	// the item-typed func signatures.
-	codecEncode any
-	codecDecode any
-}
-
-// bboltOnly returns an error if o.call is not a bbolt constructor; used by the
-// bbolt-specific options.
-func (o backingOpts) bboltOnly(name string) error {
-	switch o.call {
-	case callBboltFIFO, callBboltPriority:
-		return nil
-	default:
-		return fmt.Errorf("%s is only valid for the bbolt backings (NewBboltFIFO/NewBboltPriority)", name)
-	}
-}
 
 // WithCodec sets the on-disk serialization for the bbolt backings. enc writes an item
 // into a reused *bytes.Buffer; dec reads a record back into a reused *T. The package
@@ -69,15 +16,15 @@ func (o backingOpts) bboltOnly(name string) error {
 // function fields) require this — NewBboltFIFO/NewBboltPriority return ErrCodecRequired
 // for such an item type when WithCodec is absent. Valid only for the bbolt backings.
 func WithCodec[T Item[T]](enc func(dst *bytes.Buffer, v T) error, dec func(src []byte, dst *T) error) BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		if err := o.bboltOnly("WithCodec"); err != nil {
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		if err := o.BboltOnly("WithCodec"); err != nil {
 			return o, err
 		}
 		if enc == nil || dec == nil {
-			return o, fmt.Errorf("WithCodec requires a non-nil encoder and decoder")
+			return o, fmt.Errorf("%w: WithCodec requires a non-nil encoder and decoder", ErrBadOption)
 		}
-		o.codecEncode = enc
-		o.codecDecode = dec
+		o.CodecEncode = enc
+		o.CodecDecode = dec
 		return o, nil
 	}
 }
@@ -89,12 +36,12 @@ func WithCodec[T Item[T]](enc func(dst *bytes.Buffer, v T) error, dec func(src [
 // positional btype tree to a keyed B-Tree, the positional FIFO having no stable locator
 // to index), NewBTreePriority, NewBboltFIFO and NewBboltPriority.
 func WithIndex() BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		switch o.call {
-		case callBTreeFIFO, callBTreePriority, callBboltFIFO, callBboltPriority:
-			o.index = true
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		switch o.Call {
+		case core.CallBTreeFIFO, core.CallBTreePriority, core.CallBboltFIFO, core.CallBboltPriority:
+			o.Index = true
 		default:
-			return o, fmt.Errorf("WithIndex is not valid for this backing")
+			return o, fmt.Errorf("%w: WithIndex is not valid for %s", ErrBadOption, o.Call)
 		}
 		return o, nil
 	}
@@ -105,12 +52,15 @@ func WithIndex() BackingOption {
 // (default 32). Valid only for the keyed B-Tree backings: NewBTreeFIFO (indexed) and
 // NewBTreePriority.
 func WithBTreeWidth(width int) BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		switch o.call {
-		case callBTreeFIFO, callBTreePriority:
-			o.width = width
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		switch o.Call {
+		case core.CallBTreeFIFO, core.CallBTreePriority:
+			if width < 2 {
+				return o, fmt.Errorf("%w: WithBTreeWidth must be at least 2, got %d", ErrBadOption, width)
+			}
+			o.Width = width
 		default:
-			return o, fmt.Errorf("WithBTreeWidth is not valid for this backing")
+			return o, fmt.Errorf("%w: WithBTreeWidth is not valid for %s", ErrBadOption, o.Call)
 		}
 		return o, nil
 	}
@@ -120,11 +70,11 @@ func WithBTreeWidth(width int) BackingOption {
 // faster for bulk loading but is unsafe: a crash or OS failure can lose recently committed
 // items. Valid only for NewBboltFIFO and NewBboltPriority.
 func WithNoSync() BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		if err := o.bboltOnly("WithNoSync"); err != nil {
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		if err := o.BboltOnly("WithNoSync"); err != nil {
 			return o, err
 		}
-		o.boltNoSync = true
+		o.BoltNoSync = true
 		return o, nil
 	}
 }
@@ -134,11 +84,11 @@ func WithNoSync() BackingOption {
 // so it remains crash-safe but reopen is slower. Valid only for NewBboltFIFO and
 // NewBboltPriority.
 func WithNoFreelistSync() BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		if err := o.bboltOnly("WithNoFreelistSync"); err != nil {
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		if err := o.BboltOnly("WithNoFreelistSync"); err != nil {
 			return o, err
 		}
-		o.boltNoFreelistSync = true
+		o.BoltNoFreelistSync = true
 		return o, nil
 	}
 }
@@ -146,11 +96,11 @@ func WithNoFreelistSync() BackingOption {
 // WithNoGrowSync skips the fsync after growing the bbolt file (bolt.Options.NoGrowSync).
 // Valid only for NewBboltFIFO and NewBboltPriority.
 func WithNoGrowSync() BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		if err := o.bboltOnly("WithNoGrowSync"); err != nil {
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		if err := o.BboltOnly("WithNoGrowSync"); err != nil {
 			return o, err
 		}
-		o.boltNoGrowSync = true
+		o.BoltNoGrowSync = true
 		return o, nil
 	}
 }
@@ -159,11 +109,11 @@ func WithNoGrowSync() BackingOption {
 // (bolt.Options.Timeout); zero (default) waits indefinitely. Valid only for NewBboltFIFO
 // and NewBboltPriority.
 func WithBoltTimeout(d time.Duration) BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		if err := o.bboltOnly("WithBoltTimeout"); err != nil {
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		if err := o.BboltOnly("WithBoltTimeout"); err != nil {
 			return o, err
 		}
-		o.boltTimeout = d
+		o.BoltTimeout = d
 		return o, nil
 	}
 }
@@ -172,11 +122,11 @@ func WithBoltTimeout(d time.Duration) BackingOption {
 // (bolt.Options.PreLoadFreelist): faster first write, slower open. Valid only for
 // NewBboltFIFO and NewBboltPriority.
 func WithBoltPreLoadFreelist() BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		if err := o.bboltOnly("WithBoltPreLoadFreelist"); err != nil {
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		if err := o.BboltOnly("WithBoltPreLoadFreelist"); err != nil {
 			return o, err
 		}
-		o.boltPreLoadFreelist = true
+		o.BoltPreLoadFreelist = true
 		return o, nil
 	}
 }
@@ -186,11 +136,11 @@ func WithBoltPreLoadFreelist() BackingOption {
 // especially for large/fragmented databases. Valid only for NewBboltFIFO and
 // NewBboltPriority.
 func WithBoltFreelistMap() BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		if err := o.bboltOnly("WithBoltFreelistMap"); err != nil {
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		if err := o.BboltOnly("WithBoltFreelistMap"); err != nil {
 			return o, err
 		}
-		o.boltFreelistMap = true
+		o.BoltFreelistMap = true
 		return o, nil
 	}
 }
@@ -199,11 +149,11 @@ func WithBoltFreelistMap() BackingOption {
 // (bolt.Options.Mlock, UNIX only); the memory cannot be reclaimed while open. Valid only
 // for NewBboltFIFO and NewBboltPriority.
 func WithBoltMlock() BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		if err := o.bboltOnly("WithBoltMlock"); err != nil {
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		if err := o.BboltOnly("WithBoltMlock"); err != nil {
 			return o, err
 		}
-		o.boltMlock = true
+		o.BoltMlock = true
 		return o, nil
 	}
 }
@@ -212,11 +162,11 @@ func WithBoltMlock() BackingOption {
 // (bolt.Options.MmapFlags), e.g. syscall.MAP_POPULATE on Linux. Valid only for
 // NewBboltFIFO and NewBboltPriority.
 func WithBoltMmapFlags(flags int) BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		if err := o.bboltOnly("WithBoltMmapFlags"); err != nil {
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		if err := o.BboltOnly("WithBoltMmapFlags"); err != nil {
 			return o, err
 		}
-		o.boltMmapFlags = flags
+		o.BoltMmapFlags = flags
 		return o, nil
 	}
 }
@@ -226,11 +176,11 @@ func WithBoltMmapFlags(flags int) BackingOption {
 // transactions from blocking write transactions. Valid only for NewBboltFIFO and
 // NewBboltPriority.
 func WithBoltInitialMmapSize(bytes int) BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		if err := o.bboltOnly("WithBoltInitialMmapSize"); err != nil {
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		if err := o.BboltOnly("WithBoltInitialMmapSize"); err != nil {
 			return o, err
 		}
-		o.boltInitialMmapSize = bytes
+		o.BoltInitialMmapSize = bytes
 		return o, nil
 	}
 }
@@ -239,11 +189,11 @@ func WithBoltInitialMmapSize(bytes int) BackingOption {
 // (bolt.Options.PageSize). It has no effect on an existing database. Valid only for
 // NewBboltFIFO and NewBboltPriority.
 func WithBoltPageSize(bytes int) BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		if err := o.bboltOnly("WithBoltPageSize"); err != nil {
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		if err := o.BboltOnly("WithBoltPageSize"); err != nil {
 			return o, err
 		}
-		o.boltPageSize = bytes
+		o.BoltPageSize = bytes
 		return o, nil
 	}
 }
@@ -252,24 +202,11 @@ func WithBoltPageSize(bytes int) BackingOption {
 // (bolt.Options.OpenFile); it defaults to os.OpenFile. Useful for hermetic tests or a
 // custom filesystem. Valid only for NewBboltFIFO and NewBboltPriority.
 func WithBoltOpenFile(fn func(string, int, os.FileMode) (*os.File, error)) BackingOption {
-	return func(o backingOpts) (backingOpts, error) {
-		if err := o.bboltOnly("WithBoltOpenFile"); err != nil {
+	return func(o core.BackingOpts) (core.BackingOpts, error) {
+		if err := o.BboltOnly("WithBoltOpenFile"); err != nil {
 			return o, err
 		}
-		o.boltOpenFile = fn
+		o.BoltOpenFile = fn
 		return o, nil
 	}
-}
-
-// applyBackingOptions seeds backingOpts for the given call and applies options in order,
-// returning the first option error.
-func applyBackingOptions(call backingCall, options []BackingOption) (backingOpts, error) {
-	o := backingOpts{call: call}
-	var err error
-	for _, opt := range options {
-		if o, err = opt(o); err != nil {
-			return o, err
-		}
-	}
-	return o, nil
 }

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gostdlib/datastructures/queue/internal/backings/btype"
+
 	"github.com/kylelemons/godebug/pretty"
 )
 
@@ -47,7 +49,7 @@ func queueMakers() []qMaker {
 			return newQ(t, b, err, ctx, max, o...)
 		}},
 		{"fifo-btype", false, func(t *testing.T, ctx context.Context, max int, o ...Option) *Queue[Number[int]] {
-			b, err := newBtypeFIFO[Number[int]]()
+			b, err := btype.New[Number[int]]()
 			return newQ(t, b, err, ctx, max, o...)
 		}},
 		{"fifo-btree+index", false, func(t *testing.T, ctx context.Context, max int, o ...Option) *Queue[Number[int]] {
@@ -342,4 +344,18 @@ func TestQueueConcurrent(t *testing.T) {
 			}
 		}
 	}
+}
+
+// memMakers is queueMakers restricted to the in-memory backings. It is the matrix for behavior only
+// those backings have — the WithOnAdmit reservation and the maxSize hydration exemption — each of
+// which has its own separate on-disk test for what the bbolt backing does instead.
+func memMakers() []qMaker {
+	var out []qMaker
+	for _, m := range queueMakers() {
+		if strings.Contains(m.name, "bbolt") {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }

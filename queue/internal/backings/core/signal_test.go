@@ -1,4 +1,4 @@
-package queue
+package core
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 )
 
 // waitForSignalWaiters polls s.waiters until it equals want or the deadline expires.
-func waitForSignalWaiters(t *testing.T, s *signal, want int32) {
+func waitForSignalWaiters(t *testing.T, s *Signal, want int32) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -25,7 +25,7 @@ func waitForSignalWaiters(t *testing.T, s *signal, want int32) {
 // nil after Signal is called and the internal waiters counter is reset to zero.
 func TestSignalWaitThenSignal(t *testing.T) {
 	ctx := t.Context()
-	s := newSignal()
+	s := NewSignal()
 
 	done := make(chan error, 1)
 	go func() { done <- s.Wait(ctx, func() {}) }()
@@ -61,7 +61,7 @@ func TestSignalMultipleWaiters(t *testing.T) {
 
 	for _, test := range tests {
 		ctx := t.Context()
-		s := newSignal()
+		s := NewSignal()
 
 		done := make(chan error, test.n)
 		for range test.n {
@@ -91,7 +91,7 @@ func TestSignalMultipleWaiters(t *testing.T) {
 // issued, and that the waiters counter decrements via Wait's deferred Add(-1).
 func TestSignalContextCancel(t *testing.T) {
 	parent := t.Context()
-	s := newSignal()
+	s := NewSignal()
 
 	wantCause := errors.New("wait cancelled by test")
 	ctx, cancel := context.WithCancelCause(parent)
@@ -126,7 +126,7 @@ func TestSignalContextCancel(t *testing.T) {
 // cycle's Signal already fired.
 func TestSignalRepeatedCycles(t *testing.T) {
 	ctx := t.Context()
-	s := newSignal()
+	s := NewSignal()
 
 	const cycles = 5
 	for i := 0; i < cycles; i++ {
@@ -157,7 +157,7 @@ func TestSignalRepeatedCycles(t *testing.T) {
 // a second Signal.
 func TestSignalNoWaiters(t *testing.T) {
 	ctx := t.Context()
-	s := newSignal()
+	s := NewSignal()
 
 	signalReturned := make(chan struct{})
 	go func() {
@@ -200,7 +200,7 @@ func TestSignalNoWaiters(t *testing.T) {
 // a short window, then verify Signal releases it.
 func TestSignalWaitBlocksUntilSignal(t *testing.T) {
 	ctx := t.Context()
-	s := newSignal()
+	s := NewSignal()
 
 	done := make(chan error, 1)
 	go func() { done <- s.Wait(ctx, func() {}) }()
@@ -232,7 +232,7 @@ func TestSignalWaitBlocksUntilSignal(t *testing.T) {
 // counter must be zero.
 func TestSignalMixedCancelAndSuccess(t *testing.T) {
 	parent := t.Context()
-	s := newSignal()
+	s := NewSignal()
 
 	const n = 10
 	wantCause := errors.New("mixed cancel")
@@ -304,7 +304,7 @@ func TestSignalMixedCancelAndSuccess(t *testing.T) {
 // decrement the counter via the deferred Add(-1) on return.
 func TestSignalAlreadyCancelledCtx(t *testing.T) {
 	parent := t.Context()
-	s := newSignal()
+	s := NewSignal()
 
 	wantCause := errors.New("pre-cancelled")
 	ctx, cancel := context.WithCancelCause(parent)
@@ -334,7 +334,7 @@ func TestSignalAlreadyCancelledCtx(t *testing.T) {
 // lands back at zero before the next batch begins.
 func TestSignalConcurrentSignals(t *testing.T) {
 	ctx := t.Context()
-	s := newSignal()
+	s := NewSignal()
 
 	const cycles = 20
 	const perCycle = 8

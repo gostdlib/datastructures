@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gostdlib/datastructures/queue/internal/backings/core"
 )
 
 // mustPanic runs f and fails unless it panics with a message containing want.
@@ -155,8 +157,11 @@ func TestValueItem(t *testing.T) {
 			t.Fatalf("TestValueItem: Push(%d) got (ok=%v err=%v), want (true,nil)", v, ok, err)
 		}
 	}
-	if err := q.Del(ctx, []Value[int]{mk(20)}); err != nil {
+	switch n, err := q.Del(ctx, []Value[int]{mk(20)}); {
+	case err != nil:
 		t.Errorf("TestValueItem: Del got err == %s, want err == nil", err)
+	case n != 1:
+		t.Errorf("TestValueItem: Del removed %d, want 1", n)
 	}
 	if ex, err := q.Exists(ctx, mk(20)); err != nil || ex {
 		t.Errorf("TestValueItem: Exists(20) after Del got (%v,%v), want (false,nil)", ex, err)
@@ -199,7 +204,7 @@ func TestBackingOptionRejection(t *testing.T) {
 
 func TestBackingOptsApplied(t *testing.T) {
 	openFn := func(string, int, os.FileMode) (*os.File, error) { return nil, nil }
-	o, err := applyBackingOptions(callBboltFIFO, []BackingOption{
+	o, err := core.ApplyBackingOptions(core.CallBboltFIFO, []BackingOption{
 		WithNoSync(), WithNoFreelistSync(), WithNoGrowSync(),
 		WithBoltPreLoadFreelist(), WithBoltFreelistMap(), WithBoltMlock(),
 		WithBoltMmapFlags(0x40), WithBoltInitialMmapSize(1 << 20),
@@ -210,29 +215,29 @@ func TestBackingOptsApplied(t *testing.T) {
 		t.Fatalf("TestBackingOptsApplied: applyBackingOptions got err == %s, want nil", err)
 	}
 	switch {
-	case !o.boltNoSync:
+	case !o.BoltNoSync:
 		t.Errorf("TestBackingOptsApplied: boltNoSync not set")
-	case !o.boltNoFreelistSync:
+	case !o.BoltNoFreelistSync:
 		t.Errorf("TestBackingOptsApplied: boltNoFreelistSync not set")
-	case !o.boltNoGrowSync:
+	case !o.BoltNoGrowSync:
 		t.Errorf("TestBackingOptsApplied: boltNoGrowSync not set")
-	case !o.boltPreLoadFreelist:
+	case !o.BoltPreLoadFreelist:
 		t.Errorf("TestBackingOptsApplied: boltPreLoadFreelist not set")
-	case !o.boltFreelistMap:
+	case !o.BoltFreelistMap:
 		t.Errorf("TestBackingOptsApplied: boltFreelistMap not set")
-	case !o.boltMlock:
+	case !o.BoltMlock:
 		t.Errorf("TestBackingOptsApplied: boltMlock not set")
-	case o.boltMmapFlags != 0x40:
-		t.Errorf("TestBackingOptsApplied: boltMmapFlags = %d, want 0x40", o.boltMmapFlags)
-	case o.boltInitialMmapSize != 1<<20:
-		t.Errorf("TestBackingOptsApplied: boltInitialMmapSize = %d, want %d", o.boltInitialMmapSize, 1<<20)
-	case o.boltPageSize != 8192:
-		t.Errorf("TestBackingOptsApplied: boltPageSize = %d, want 8192", o.boltPageSize)
-	case o.boltTimeout != 3*time.Second:
-		t.Errorf("TestBackingOptsApplied: boltTimeout = %s, want 3s", o.boltTimeout)
-	case o.boltOpenFile == nil:
+	case o.BoltMmapFlags != 0x40:
+		t.Errorf("TestBackingOptsApplied: boltMmapFlags = %d, want 0x40", o.BoltMmapFlags)
+	case o.BoltInitialMmapSize != 1<<20:
+		t.Errorf("TestBackingOptsApplied: boltInitialMmapSize = %d, want %d", o.BoltInitialMmapSize, 1<<20)
+	case o.BoltPageSize != 8192:
+		t.Errorf("TestBackingOptsApplied: boltPageSize = %d, want 8192", o.BoltPageSize)
+	case o.BoltTimeout != 3*time.Second:
+		t.Errorf("TestBackingOptsApplied: boltTimeout = %s, want 3s", o.BoltTimeout)
+	case o.BoltOpenFile == nil:
 		t.Errorf("TestBackingOptsApplied: boltOpenFile not set")
-	case !o.index:
+	case !o.Index:
 		t.Errorf("TestBackingOptsApplied: index not set")
 	}
 }
@@ -320,12 +325,16 @@ func TestBboltOpenFile(t *testing.T) {
 	}
 }
 
-// TestWithBTreeWidth verifies WithBTreeWidth is validated on the keyed-btree paths
-// (indexed FIFO and priority): width < 2 is rejected there. On a plain (positional/btype)
-// FIFO WithBTreeWidth is a no-op, so width < 2 is accepted.
+// TestWithBTreeWidth verifies WithBTreeWidth is validated wherever it is written: width < 2 is
+// rejected on the keyed-btree paths (indexed FIFO and priority) that consume it, and on the plain
+// (positional/btype) FIFO that does not. That last one used to accept it, because NewBTreeFIFO
+// returns the btype tree before the width is ever looked at — a call the option documents as an
+// error, made legal by the absence of an unrelated option. The range check lives in the option's
+// own closure now. TestBTreeWidth in contract_test.go is the full range matrix; what is left here
+// is the round trip that shows a legal width still builds a working queue.
 func TestWithBTreeWidth(t *testing.T) {
-	if _, err := NewBTreeFIFO[Number[int]](WithBTreeWidth(1)); err != nil {
-		t.Errorf("TestWithBTreeWidth: NewBTreeFIFO(width=1) (no index, btype) got err == %s, want nil", err)
+	if _, err := NewBTreeFIFO[Number[int]](WithBTreeWidth(1)); err == nil {
+		t.Errorf("TestWithBTreeWidth: NewBTreeFIFO(width=1) (no index, btype) got err == nil, want err != nil")
 	}
 	if _, err := NewBTreeFIFO[Number[int]](WithBTreeWidth(1), WithIndex()); err == nil {
 		t.Errorf("TestWithBTreeWidth: NewBTreeFIFO(width=1, WithIndex) got err == nil, want err != nil")
