@@ -138,7 +138,7 @@ func pop(t *testing.T, ctx context.Context, name string, q *Queue[Number[int]], 
 	for len(got) < n {
 		items, err := q.Pop(ctx, n-len(got))
 		if err != nil {
-			t.Fatalf("TestBackingsConformance(%s): Pop got err == %s, want err == nil", name, err)
+			t.Fatalf("%s(%s): Pop got err == %s, want err == nil", t.Name(), name, err)
 		}
 		for _, v := range items {
 			got = append(got, v.V)
@@ -222,8 +222,12 @@ func TestBackingsConformance(t *testing.T) {
 				t.Fatalf("TestBackingsConformance(%s): Push(%d) got err == %s", test.name, n, err)
 			}
 		}
-		if err := q.Del(ctx, []Number[int]{queryItem(7)}); err != nil {
+		// The count is of entries removed, not of query items matched: one query removes both 7s.
+		switch n, err := q.Del(ctx, []Number[int]{queryItem(7)}); {
+		case err != nil:
 			t.Errorf("TestBackingsConformance(%s): Del(7) got err == %s, want err == nil", test.name, err)
+		case n != 2:
+			t.Errorf("TestBackingsConformance(%s): Del(7) removed %d, want 2", test.name, n)
 		}
 		if n := q.Len(); n != 1 {
 			t.Errorf("TestBackingsConformance(%s): Len after Del got %d, want 1", test.name, n)
@@ -242,8 +246,12 @@ func TestBackingsConformance(t *testing.T) {
 				t.Fatalf("TestBackingsConformance(%s): Push(%d) got err == %s", test.name, n, err)
 			}
 		}
-		if err := q.Del(ctx, []Number[int]{queryItem(7), queryItem(9), queryItem(7)}); err != nil {
+		// Four entries go (two 7s, two 9s); the duplicated 7 query does not double-count them.
+		switch n, err := q.Del(ctx, []Number[int]{queryItem(7), queryItem(9), queryItem(7)}); {
+		case err != nil:
 			t.Errorf("TestBackingsConformance(%s): batch Del got err == %s, want err == nil", test.name, err)
+		case n != 4:
+			t.Errorf("TestBackingsConformance(%s): batch Del removed %d, want 4", test.name, n)
 		}
 		if n := q.Len(); n != 1 {
 			t.Errorf("TestBackingsConformance(%s): Len after batch Del got %d, want 1", test.name, n)
@@ -254,14 +262,27 @@ func TestBackingsConformance(t *testing.T) {
 			}
 		}
 
-		// Empty and nil v are no-ops that do not error or change Len.
-		for _, empty := range [][]Number[int]{nil, {}} {
-			if err := q.Del(ctx, empty); err != nil {
-				t.Errorf("TestBackingsConformance(%s): Del(empty) got err == %s, want err == nil", test.name, err)
+		// Every way a Del can remove nothing: not an error, reports 0, leaves the queue alone.
+		// Reporting 0 is what makes "removed something" distinguishable, which is the whole
+		// reason Del carries a count.
+		noopTests := []struct {
+			name  string
+			query []Number[int]
+		}{
+			{name: "Success: a nil query is a no-op", query: nil},
+			{name: "Success: an empty query is a no-op", query: []Number[int]{}},
+			{name: "Success: a query matching nothing removes 0", query: []Number[int]{queryItem(4242)}},
+		}
+		for _, noop := range noopTests {
+			switch n, err := q.Del(ctx, noop.query); {
+			case err != nil:
+				t.Errorf("TestBackingsConformance(%s/%s): got err == %s, want err == nil", test.name, noop.name, err)
+			case n != 0:
+				t.Errorf("TestBackingsConformance(%s/%s): removed %d, want 0", test.name, noop.name, n)
 			}
 		}
 		if n := q.Len(); n != 1 {
-			t.Errorf("TestBackingsConformance(%s): Len after empty Del got %d, want 1", test.name, n)
+			t.Errorf("TestBackingsConformance(%s): Len after the no-op Dels got %d, want 1", test.name, n)
 		}
 		if rem := pop(t, ctx, test.name, q, 1); len(rem) != 1 || rem[0] != 8 {
 			t.Errorf("TestBackingsConformance(%s): remaining after batch Del got %v, want [8]", test.name, rem)
@@ -299,7 +320,8 @@ func TestBackingsConformance(t *testing.T) {
 }
 
 // TestKindValidation verifies a priority backing rejects items with Priority() == 0 and a
-// FIFO backing rejects items with Priority() > 0.
+// FIFO backing rejects items with Priority() > 0. Each backing also gets an accepted item, so a
+// backing that refused everything could not pass this on the rejections alone.
 func TestKindValidation(t *testing.T) {
 	ctx := t.Context()
 
@@ -309,6 +331,26 @@ func TestKindValidation(t *testing.T) {
 		item    Number[int]
 		wantErr error
 	}{
+		{
+			name:    "Success: priority backing accepts Priority()>0",
+			backing: func() (Backing[Number[int]], error) { return NewPriority[Number[int]]() },
+			item:    Number[int]{V: 1, P: 5},
+		},
+		{
+			name:    "Success: btree priority backing accepts Priority()>0",
+			backing: func() (Backing[Number[int]], error) { return NewBTreePriority[Number[int]]() },
+			item:    Number[int]{V: 1, P: 5},
+		},
+		{
+			name:    "Success: FIFO backing accepts Priority()==0",
+			backing: func() (Backing[Number[int]], error) { return NewFIFO[Number[int]]() },
+			item:    Number[int]{V: 1, P: 0},
+		},
+		{
+			name:    "Success: btree FIFO backing accepts Priority()==0",
+			backing: func() (Backing[Number[int]], error) { return NewBTreeFIFO[Number[int]]() },
+			item:    Number[int]{V: 1, P: 0},
+		},
 		{
 			name:    "Error: priority backing rejects Priority()==0",
 			backing: func() (Backing[Number[int]], error) { return NewPriority[Number[int]]() },
@@ -345,9 +387,35 @@ func TestKindValidation(t *testing.T) {
 			t.Fatalf("TestKindValidation(%s): New got err == %s, want err == nil", test.name, err)
 		}
 		_, err = q.Push(ctx, []Number[int]{test.item})
-		if !errors.Is(err, test.wantErr) {
-			t.Errorf("TestKindValidation(%s): Push got err == %v, want %v", test.name, err, test.wantErr)
+		switch {
+		case test.wantErr != nil:
+			if !errors.Is(err, test.wantErr) {
+				t.Errorf("TestKindValidation(%s): Push got err == %v, want %v", test.name, err, test.wantErr)
+			}
+		case err != nil:
+			t.Errorf("TestKindValidation(%s): Push got err == %s, want err == nil", test.name, err)
+		default:
+			// Accepted means queued, not merely not-rejected.
+			if n := q.Len(); n != 1 {
+				t.Errorf("TestKindValidation(%s): Len after Push got %d, want 1", test.name, n)
+			}
 		}
 		q.Close(ctx)
 	}
+}
+
+// sortedQueueVals returns every value currently in the queue, ascending, so a test can assert on
+// which entries are present rather than only on how many.
+func sortedQueueVals(t *testing.T, ctx context.Context, q *Queue[Number[int]]) []int {
+	t.Helper()
+
+	var got []int
+	for v, err := range q.RangeAll(ctx) {
+		if err != nil {
+			t.Fatalf("%s: RangeAll got err == %s, want err == nil", t.Name(), err)
+		}
+		got = append(got, v.V)
+	}
+	sort.Ints(got)
+	return got
 }

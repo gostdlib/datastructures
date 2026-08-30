@@ -1,4 +1,4 @@
-package queue
+package core
 
 // Micro-benchmarks for the signal primitive itself (signal.go), independent
 // of the surrounding queue. These exercise the wake mechanism in isolation
@@ -28,7 +28,7 @@ import (
 )
 
 func BenchmarkSignalPrimNoWaiter(b *testing.B) {
-	s := newSignal()
+	s := NewSignal()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -37,7 +37,7 @@ func BenchmarkSignalPrimNoWaiter(b *testing.B) {
 }
 
 func BenchmarkSignalPrimHasWaitersGated(b *testing.B) {
-	s := newSignal()
+	s := NewSignal()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -48,7 +48,7 @@ func BenchmarkSignalPrimHasWaitersGated(b *testing.B) {
 }
 
 func BenchmarkSignalPrimHasWaitersOnly(b *testing.B) {
-	s := newSignal()
+	s := NewSignal()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -60,7 +60,7 @@ func BenchmarkSignalPrimHasWaitersOnly(b *testing.B) {
 // Signals, the consumer's Wait returns, and the consumer re-parks. b.N
 // iterations equals b.N Signal/Wait round-trips.
 func BenchmarkSignalPrimPingPong(b *testing.B) {
-	s := newSignal()
+	s := NewSignal()
 	ctx := b.Context()
 
 	// reply chan length 1 — consumer must drain before re-parking, so

@@ -75,7 +75,7 @@ func BenchmarkDel(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				v := fifoItem(i % benchItems)
-				if err := q.Del(ctx, []Number[int]{v}); err != nil {
+				if _, err := q.Del(ctx, []Number[int]{v}); err != nil {
 					b.Fatalf("Del: %v", err)
 				}
 				b.StopTimer()

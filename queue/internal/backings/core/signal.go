@@ -1,4 +1,4 @@
-package queue
+package core
 
 import (
 	"sync/atomic"
@@ -8,20 +8,20 @@ import (
 	"github.com/gostdlib/datastructures/queue/internal/parker"
 )
 
-// signal is a Mesa-style broadcast primitive. Wait registers a parker on
+// Signal is a Mesa-style broadcast primitive. Wait registers a parker on
 // the current generation and parks via runtime.gopark; Signal calls
 // Broadcast on the parker waiter to wake every parked Wait. There is no
 // per-Wait channel allocation and no busy-wait — Signal is O(parkers) and
 // each Wait sits in the runtime's parked state until released.
-type signal struct {
+type Signal struct {
 	mu      sync.Mutex
 	waiter  *parker.Waiter
 	waiters atomic.Int32
 }
 
-// newSignal returns a signal in the "next Wait blocks" state.
-func newSignal() *signal {
-	return &signal{waiter: parker.New()}
+// NewSignal returns a Signal in the "next Wait blocks" state.
+func NewSignal() *Signal {
+	return &Signal{waiter: parker.New()}
 }
 
 // Wait parks until Signal is called or ctx is cancelled. unlock releases
@@ -31,7 +31,7 @@ func newSignal() *signal {
 // waiters==0 and complete as a no-op. If the caller has no external lock
 // to release, pass func(){}. If ctx is cancelled, context.Cause(ctx) is
 // returned.
-func (s *signal) Wait(ctx context.Context, unlock func()) error {
+func (s *Signal) Wait(ctx context.Context, unlock func()) error {
 	s.mu.Lock()
 	p := s.waiter.Register()
 	s.waiters.Add(1)
@@ -80,12 +80,12 @@ func (s *signal) Wait(ctx context.Context, unlock func()) error {
 // HasWaiters reports whether at least one Wait is currently registered.
 // Callers gate Signal on this so the steady-state (no parked waiter) case
 // skips Signal entirely, keeping the hot path allocation-free.
-func (s *signal) HasWaiters() bool { return s.waiters.Load() > 0 }
+func (s *Signal) HasWaiters() bool { return s.waiters.Load() > 0 }
 
-// Signal wakes every currently parked waiter and rearms the signal so the
+// Signal wakes every currently parked waiter and rearms the Signal so the
 // next Wait blocks. Signal does not wait for the woken Waits to return;
 // each parker's gopark returns at its own pace. Concurrent Signals are
 // safe: parker.Broadcast serializes through its own mutex.
-func (s *signal) Signal() {
+func (s *Signal) Signal() {
 	s.waiter.Broadcast()
 }

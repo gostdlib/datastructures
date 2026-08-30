@@ -1,4 +1,4 @@
-package queue
+package core
 
 // Diagnostic benchmarks for narrowing down where the 4 allocs/op in
 // BenchmarkSignalPrimPingPong come from. Each isolates one cost so we can
@@ -61,7 +61,7 @@ func BenchmarkDiagAfterFuncBoundMethod(b *testing.B) {
 // so signal.Wait takes its no-watcher branch. Subtracts the AfterFunc /
 // method-value overhead from the headline PingPong number.
 func BenchmarkSignalPrimPingPongBgCtx(b *testing.B) {
-	s := newSignal()
+	s := NewSignal()
 	ctx := gctx.Background()
 
 	reply := make(chan struct{}, 1)

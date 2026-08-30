@@ -9,9 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gostdlib/datastructures/queue/internal/backings/btype"
+
 	"github.com/beeker1121/goque"
 	diskqueue "github.com/nsqio/go-diskqueue"
-	"github.com/tidwall/btype"
+	tidbtype "github.com/tidwall/btype"
 )
 
 var benchSizes = []int{1000, 5000, 10000, 50000, 100000}
@@ -76,7 +78,7 @@ func (o ourQueue) cleanup() { o.q.Close(o.ctx) }
 
 // btypeQueue adapts github.com/tidwall/btype.Queue (in-memory FIFO, no ctx, non-blocking).
 type btypeQueue struct {
-	q *btype.Queue[Number[int]]
+	q *tidbtype.Queue[Number[int]]
 }
 
 func (b btypeQueue) push(n int) { b.q.Push(Number[int]{V: n}) }
@@ -93,7 +95,7 @@ func (b btypeQueue) cleanup() {}
 // concurrent use). This isolates the cost of the lock the bare structure omits.
 type lockedBtypeQueue struct {
 	mu sync.RWMutex
-	q  *btype.Queue[Number[int]]
+	q  *tidbtype.Queue[Number[int]]
 }
 
 func (b *lockedBtypeQueue) push(n int) {
@@ -274,7 +276,7 @@ func memoryVariants() []benchVariant {
 		},
 		{
 			name: "ours-fifo-btype",
-			make: ourMaker(0, false, func() (Backing[Number[int]], error) { return newBtypeFIFO[Number[int]]() }),
+			make: ourMaker(0, false, func() (Backing[Number[int]], error) { return btype.New[Number[int]]() }),
 		},
 		{
 			name: "ours-fifo-index",
@@ -291,12 +293,12 @@ func memoryVariants() []benchVariant {
 		},
 		{
 			name: "tidwall-btype",
-			make: func(b *testing.B, size int) benchQueue { return btypeQueue{q: &btype.Queue[Number[int]]{}} },
+			make: func(b *testing.B, size int) benchQueue { return btypeQueue{q: &tidbtype.Queue[Number[int]]{}} },
 		},
 		{
 			name: "tidwall-btype-locked",
 			make: func(b *testing.B, size int) benchQueue {
-				return &lockedBtypeQueue{q: &btype.Queue[Number[int]]{}}
+				return &lockedBtypeQueue{q: &tidbtype.Queue[Number[int]]{}}
 			},
 		},
 	}

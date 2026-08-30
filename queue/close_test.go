@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/gostdlib/datastructures/queue/internal/backings/core"
 )
 
 // TestQueueCloseUnblocks verifies that Close unblocks an in-flight Pop (empty queue) and
@@ -70,11 +72,6 @@ func TestQueueCloseUnblocks(t *testing.T) {
 	}
 }
 
-// closedOrCauser is the per-backing helper under test. Every backing implements it.
-type closedOrCauser interface {
-	closedOrCause(ctx context.Context) error
-}
-
 // TestClosedOrCausePrecedence checks the ctx.Done() arm helper directly (no timing):
 // a closed backing yields ErrClosed even when ctx is canceled (Close precedence); an
 // open backing yields the ctx cause. Covers an in-memory and the on-disk backing.
@@ -107,16 +104,16 @@ func TestClosedOrCausePrecedence(t *testing.T) {
 	for _, test := range tests {
 		ctx := t.Context()
 		b := test.make(t, ctx)
-		c, ok := b.(closedOrCauser)
+		c, ok := b.(core.ClosedOrCauser)
 		if !ok {
-			t.Fatalf("TestClosedOrCausePrecedence(%s): backing does not implement closedOrCause", test.name)
+			t.Fatalf("TestClosedOrCausePrecedence(%s): backing does not implement core.ClosedOrCauser", test.name)
 		}
 
 		cctx, cancel := context.WithCancel(ctx)
 		cancel()
 
 		// Open backing + canceled ctx: returns the ctx cause, not ErrClosed.
-		if err := c.closedOrCause(cctx); !errors.Is(err, context.Canceled) || errors.Is(err, ErrClosed) {
+		if err := c.ClosedOrCause(cctx); !errors.Is(err, context.Canceled) || errors.Is(err, ErrClosed) {
 			t.Errorf("TestClosedOrCausePrecedence(%s): open got err == %v, want context.Canceled", test.name, err)
 		}
 
@@ -124,7 +121,7 @@ func TestClosedOrCausePrecedence(t *testing.T) {
 		if err := b.Close(ctx); err != nil {
 			t.Fatalf("TestClosedOrCausePrecedence(%s): Close got err == %s", test.name, err)
 		}
-		if err := c.closedOrCause(cctx); !errors.Is(err, ErrClosed) {
+		if err := c.ClosedOrCause(cctx); !errors.Is(err, ErrClosed) {
 			t.Errorf("TestClosedOrCausePrecedence(%s): closed got err == %v, want ErrClosed (Close precedence)", test.name, err)
 		}
 	}

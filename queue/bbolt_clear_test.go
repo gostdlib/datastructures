@@ -3,6 +3,8 @@ package queue
 import (
 	"testing"
 	"time"
+
+	"github.com/gostdlib/datastructures/queue/internal/backings/bbolt"
 )
 
 // TestBboltClearDrainsInFlightPush is a regression test: a Clear concurrent with a
@@ -25,7 +27,7 @@ func TestBboltClearDrainsInFlightPush(t *testing.T) {
 	}
 	// Install the per-instance hook before the queue is exposed (and thus before any
 	// flusher work runs). New (below) is what starts the flusher goroutine.
-	b.(*bboltBacking[Number[int]]).hooks.commitStart = func() {
+	b.(*bbolt.Backing[Number[int]]).Hooks.CommitStart = func() {
 		if first {
 			first = false
 			close(started)

@@ -132,7 +132,7 @@ func Example_existsDelete() {
 	}
 	fmt.Println("exists(2):", got)
 
-	if err := q.Del(ctx, []queue.Number[int]{{V: 2}}); err != nil {
+	if _, err := q.Del(ctx, []queue.Number[int]{{V: 2}}); err != nil {
 		panic(err)
 	}
 

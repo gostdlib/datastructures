@@ -6,6 +6,7 @@ require (
 	github.com/beeker1121/goque v2.1.0+incompatible
 	github.com/go-json-experiment/json v0.0.0-20250725192818-e39067aee2d2
 	github.com/google/uuid v1.6.0
+	github.com/gostdlib/base v0.0.0-20260828130702-dab08d967366
 	github.com/kylelemons/godebug v1.1.0
 	github.com/nsqio/go-diskqueue v1.1.0
 	github.com/stretchr/testify v1.10.0
@@ -14,6 +15,7 @@ require (
 	go.etcd.io/bbolt v1.4.3
 	go.opentelemetry.io/otel v1.37.0
 	go.opentelemetry.io/otel/metric v1.37.0
+	go.opentelemetry.io/otel/sdk/metric v1.37.0
 	golang.org/x/exp v0.0.0-20241217172543-b2144cdd0a67
 )
 
@@ -39,6 +41,7 @@ require (
 	github.com/grafana/regexp v0.0.0-20240518133315-a468a5bfb3bc // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.1 // indirect
 	github.com/jedib0t/go-pretty/v6 v6.6.7 // indirect
+	github.com/johnsiilver/stringer v0.0.0-20260403162253-80433fe5d40b // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
@@ -76,17 +79,19 @@ require (
 	go.opentelemetry.io/otel/exporters/prometheus v0.59.1 // indirect
 	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.37.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.37.0 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.37.0 // indirect
 	go.opentelemetry.io/otel/trace v1.37.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.7.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	golang.org/x/mod v0.36.0 // indirect
 	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
+	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/term v0.43.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	golang.org/x/time v0.9.0 // indirect
+	golang.org/x/tools v0.45.0 // indirect
 	google.golang.org/genproto v0.0.0-20220204002441-d6cc3cc0770e // indirect
 	google.golang.org/grpc v1.73.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
@@ -107,8 +112,7 @@ require (
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/gostdlib/base v0.0.0-00010101000000-000000000000
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 )
 
-replace github.com/gostdlib/base => ../base
+tool github.com/gostdlib/values/generators/stringer

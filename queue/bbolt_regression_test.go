@@ -3,6 +3,7 @@ package queue
 import (
 	"bytes"
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -117,16 +118,23 @@ func TestBboltRangeAllCOWReleasesLock(t *testing.T) {
 
 	pushed := make(chan time.Time, 1)
 	start := time.Now()
-	seen := 0
+	// seen counts items yielded so far; seenWhenPushed records where the iteration had got to
+	// at the moment the concurrent writer finally got through. That count is what actually
+	// distinguishes the two behaviors, and unlike elapsed time it does not move with machine
+	// load: honoring COW, the writer gets through with items still to come; holding the lock
+	// for the whole scan, it cannot get through until every item has been yielded.
+	var seen atomic.Int64
+	var seenWhenPushed atomic.Int64
 	for _, err := range q.RangeAllCOW(ctx) {
 		if err != nil {
 			t.Fatalf("TestBboltRangeAllCOWReleasesLock: iteration got err == %s, want err == nil", err)
 		}
-		if seen == 0 {
+		if seen.Load() == 0 {
 			pushStarted := make(chan struct{})
 			go func() {
 				close(pushStarted) // about to enter Push (which then blocks on writeWanted)
 				_, _ = q.Push(ctx, []Number[int]{fifoItem(999)})
+				seenWhenPushed.Store(seen.Load())
 				pushed <- time.Now()
 			}()
 			// Wait for the worker to reach Push before sleeping; if the scheduler
@@ -136,7 +144,7 @@ func TestBboltRangeAllCOWReleasesLock(t *testing.T) {
 			<-pushStarted
 			time.Sleep(40 * time.Millisecond) // let the writer register as pending
 		}
-		seen++
+		seen.Add(1)
 	}
 	iterDone := time.Now()
 
@@ -147,13 +155,16 @@ func TestBboltRangeAllCOWReleasesLock(t *testing.T) {
 		t.Fatalf("TestBboltRangeAllCOWReleasesLock: concurrent Push never completed")
 	}
 
-	// Total iteration decodes every item (~items*15ms). If the writer had to wait for
-	// the lock until the decode-heavy scan finished, it would unblock at roughly
-	// iteration end. Honoring COW, it unblocks well before that.
+	// Assert on iteration progress rather than on elapsed time. The previous form compared the
+	// writer's wait against half the iteration, and both of those stretch under load but not by
+	// the same factor, so a slow machine could fail a queue that behaved perfectly — it did,
+	// missing by 3ms. How far the scan had got when the writer got through is the same number
+	// whether the machine is idle or thrashing.
 	writerWaited := pushedAt.Sub(start)
 	iterTook := iterDone.Sub(start)
-	if writerWaited >= iterTook/2 {
-		t.Errorf("TestBboltRangeAllCOWReleasesLock: writer unblocked after %s of a %s iteration; want it to proceed during iteration (COW lock not released)", writerWaited, iterTook)
+	if got := seenWhenPushed.Load(); got >= items {
+		t.Errorf("TestBboltRangeAllCOWReleasesLock: the writer only got through once all %d items had been yielded (waited %s of a %s iteration); want it to proceed while the scan still had items left, which is what releasing the lock for COW buys",
+			items, writerWaited, iterTook)
 	}
 }
 

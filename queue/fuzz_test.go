@@ -4,6 +4,8 @@ import (
 	"context"
 	"slices"
 	"testing"
+
+	"github.com/gostdlib/datastructures/queue/internal/backings/btype"
 )
 
 // The fuzz tests drive a queue with an operation script decoded from the fuzz input and
@@ -167,10 +169,16 @@ func runScript(t *testing.T, ctx context.Context, name string, q *Queue[Number[i
 				t.Fatalf("Fuzz%s: Exists(%d) got %v, want %v", name, v, got, m.exists(v))
 			}
 		case 5: // del
-			if err := q.Del(ctx, []Number[int]{queryItem(v)}); err != nil {
+			n, err := q.Del(ctx, []Number[int]{queryItem(v)})
+			if err != nil {
 				t.Fatalf("Fuzz%s: Del(%d) got err == %s, want err == nil", name, v, err)
 			}
+			before := m.len()
 			m.del(v)
+			// The model knows exactly how many entries that query took out.
+			if want := before - m.len(); n != want {
+				t.Fatalf("Fuzz%s: Del(%d) removed %d, want %d", name, v, n, want)
+			}
 		case 6: // batch del with a duplicate element (exercises the dedup path)
 			// v2 is an independent fuzz byte. Consume an extra byte when available
 			// (advancing i so the next op does not reinterpret it); otherwise fall
@@ -180,10 +188,16 @@ func runScript(t *testing.T, ctx context.Context, name string, q *Queue[Number[i
 				v2 = int(data[i+2])
 				i++
 			}
-			if err := q.Del(ctx, []Number[int]{queryItem(v), queryItem(v), queryItem(v2)}); err != nil {
+			n, err := q.Del(ctx, []Number[int]{queryItem(v), queryItem(v), queryItem(v2)})
+			if err != nil {
 				t.Fatalf("Fuzz%s: batch Del(%d,%d) got err == %s, want err == nil", name, v, v2, err)
 			}
+			before := m.len()
 			m.delMany([]int{v, v, v2})
+			// A duplicated query does not double-count: the count is entries removed.
+			if want := before - m.len(); n != want {
+				t.Fatalf("Fuzz%s: batch Del(%d,%d) removed %d, want %d", name, v, v2, n, want)
+			}
 		}
 		if got := q.Len(); got != int64(m.len()) {
 			t.Fatalf("Fuzz%s: Len after op %d got %d, want %d", name, op, got, m.len())
@@ -234,7 +248,7 @@ var fifoFuzzBackings = []func(t *testing.T, ctx context.Context) (Backing[Number
 	func(*testing.T, context.Context) (Backing[Number[int]], error) {
 		return NewBTreeFIFO[Number[int]](WithIndex())
 	},
-	func(*testing.T, context.Context) (Backing[Number[int]], error) { return newBtypeFIFO[Number[int]]() },
+	func(*testing.T, context.Context) (Backing[Number[int]], error) { return btype.New[Number[int]]() },
 	func(t *testing.T, ctx context.Context) (Backing[Number[int]], error) {
 		return NewBboltFIFO[Number[int]](ctx, diskRoot(t), WithNoSync())
 	},
